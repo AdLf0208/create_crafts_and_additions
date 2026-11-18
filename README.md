@@ -1,107 +1,66 @@
-# Create Crafts & Additions — Horizon port (slice 1: the FE half)
+# Create Crafts & Additions — a Horizon port
 
-A native Horizon port of **Create Crafts & Additions 1.7.2** (`MRH0/createaddition`, **MIT**): the
-electric half of the mod — two connectors, wire links and the modular accumulator — with the jar's
-own transfer rates.
+**Create Crafts & Additions** is a Minecraft mod. Create Crafts & Additions, Addon to the Create mod. This repository is a **port of it to [Horizon](https://github.com/horizon-rust/horizon)**, the Rust engine for Minecraft Java 26.3. It carries the complete source of the port plus the content files it ships, and installs as a single `.hmod` package.
 
-**LOCAL-ONLY** until the maintainer approves publishing (ARCHITECTURE.md §8). MIT is licence rank 0
-(permissive); the approval is still required.
+Upstream: [mrh0/createaddition](https://github.com/mrh0/createaddition) — licence **MIT**.
 
-The rotation half (`electric_motor`, `alternator`, `rolling_mill`, `tesla_coil`, `servo_motor`) is
-**not** in this slice: the parent Create is a separate native mod with no mod-to-mod API, so those
-blocks cannot join its kinetic network. They are a recorded gap, not an omission.
-
-Behaviour reading: [`FINDINGS.md`](FINDINGS.md). Ladder, deviations, gaps, the hook table and the
-migration: [`notes.md`](notes.md). Verification evidence:
-[`VALIDATION.md`](VALIDATION.md) and `ports/_shared/evidence/createaddition/`. Content decisions:
-[`CONTENT.md`](CONTENT.md).
-
-## One package, code and content
-
-This is a **flat SDK package** (mod API 0.2): `horizon-mod.toml` + `Cargo.toml` + `src/` + the
-carried `assets/` and `data/`. One `createaddition.hmod` installs both — there is no separate content
-file, no `.horizon-cache` write and no dev-mod list to manage (the retired 0.1.0 `.hnmod` embedded
-the content that way; see `notes.md`).
-
-Three blocks and seven items:
-
-| Kind | Ids |
+| | |
 |---|---|
-| Blocks | `createaddition:connector`, `createaddition:large_connector`, `createaddition:modular_accumulator` |
-| Items | `createaddition:copper_wire`, `gold_wire`, `electrum_wire`, `spool`, `copper_spool`, `gold_spool`, `electrum_spool` |
+| Upstream mod | Create Crafts & Additions ([source](https://github.com/mrh0/createaddition)) |
+| Ported to | Horizon 0b14f8a, Minecraft Java 26.3, mod API `0.2` |
+| Package | `createaddition.hmod` (install it with the Horizon launcher) |
+| Licence | **MIT** — the upstream mod's licence; see [Licence and credit](#licence-and-credit) |
 
-## What it does
+## What this port implements
 
-- A connector is mounted on a face, like upstream's: it is placed against the block you click and
-  its `facing` points at it (`BlockPart::state_for_placement`).
-- Its **mode** is decided from that block on the first pass after it is placed, as upstream's
-  `ConnectorMode.test` does: a block that can give is **pulled** from, one that can only take is
-  **pushed** into. `/createaddition mode` sets it (upstream uses Create's wrench, which is not
-  installed here).
-- A **spool** lays a wire: right-click one connector, then another. The empty spool takes the wires
-  out. The rules are the jar's: a small connector's wire reaches 16 blocks and a large one's 32 (the
-  shorter of the two bounds the pair), each connector has 4 or 6 nodes, one wire per node, and
-  copper is refused between two large connectors.
-- Every tick after the level's own, each wire network moves FE: a pull connector draws up to
-  **1,000 FE/t** (small) or **5,000 FE/t** (large) from its block into the network's buffer, and a
-  push connector feeds its block from that buffer. The network buffer is double-buffered like
-  upstream's `EnergyNetwork`, so energy arrives one tick after it is drawn, and it is capped by
-  `min(80,000, members * (3 * demand + 10))`.
-- The **modular accumulator** is a 2,000,000 FE buffer, 5,000 FE/t either way, and feeds the blocks
-  above and below it (`tickOutput`), as a single block of upstream's tower does.
-- FE is moved through the engine's `ENERGY` capability (`LevelRef::capability` +
-  `EnergyHandler::insert`/`extract`, and `move_energy` for the accumulator), never created: the
-  runtime's own conservation test and the in-game check both prove source + sink + buffer is
-  constant.
+- **`createaddition:connector`** (small) and **`createaddition:large_connector`**
+- **Placement mode**, upstream's `ConnectorMode.test` on the first pass after it
+- **Wire links**, upstream's `WireSpool.useOn` rules: a spool's first right
+- **The network pass**, after the level's tick: every connector that ticked is
+- **`createaddition:modular_accumulator`** — 2,000,000 FE, 5,000 FE/t in and
+- **Commands** — the harness's and an admin's interface, because the slice has
 
-## Commands
+## Not yet ported
 
-`/createaddition info|energy|link|unlink|mode …` are the harness's readout and the controls the GUI
-and Create's wrench would give a player. Every usage takes an optional trailing `tag:word`, which the
-reply repeats as ` [#tag]` so a harness can tell answers apart. The readout text is byte-identical to
-0.1.0's, so the scenario's existing assertions still match.
+- **The in-game e2e has not been run against this package.** `cargo horizon-mod build` packs;
+- **The rotation half**: `electric_motor`, `alternator`, `rolling_mill`,
+- **`small_light_connector`** (its 1 FE/t lamp consumption).
+- **`creative_energy`**, the e2e's source of last resort: the harness seeds an
+- **`portable_energy_interface`**, **`redstone_relay`**, **`energy_meter`**,
+- **GUI/tooltips**: no goggles-style readout, no mode wrench, no comparator
+- **Crafting**: no recipes (`CONTENT.md`) — the blocks are creative-only until
+- **Festive wire and spool**, the iron wire, and the electrum/brass/copper metal
 
-## Layout
+## Installing
+
+1. Install the [Horizon launcher](https://github.com/horizon-rust/horizon/releases) (0.2.70 or newer).
+2. Add `createaddition.hmod` to the instance's mods.
+3. The package is pinned to a specific Horizon build; the launcher checks that pin.
+
+## Licence and credit
+
+Create Crafts & Additions was created by its upstream authors; the code, models and assets in the original mod
+remain theirs and are used here under **MIT**. The Rust in this repository is a clean-room
+rewrite for Horizon, not a translation of the original source.
+
+- `LICENSE` — the upstream licence text.
+- `LICENSE-NOTICE.md` — what this port carries and where it came from.
+- The upstream project: https://github.com/mrh0/createaddition
+
+## Technical details
 
 ```
-horizon-mod.toml               the only manifest and identity: id, version 0.2.0, api 0.2, [native]
-Cargo.toml                     one crate; its only dependency is horizon-mod-api from .horizon/sdk/
-rustfmt.toml                   tab_spaces = 2, the campaign's style
-src/lib.rs                     the one impl Hooks: register, level_tick_post, commands
-src/network.rs                 game glue: the block entity Part, the wire links, the pass, commands
-src/runtime.rs                 the pure rules (30 tests), byte-identical to the retired bundle's
-assets/createaddition/         55 carried files: blockstates, models, textures, items, lang
-data/createaddition/           13 carried files: block and item definitions, loot tables
-createaddition.hmod            the deliverable: one file, code + content
-tools/
-  carry_content.py [--check]   jar -> assets/ and data/, with the patches documented
-  parse_info.py                `/createaddition info` line -> shell fields
-  e2e.sh                       the in-game scenario (PASS + EXIT:<status>)
-notes.md, FINDINGS.md, VALIDATION.md, CONTENT.md, AGENTS.md
-LICENSE, LICENSE-NOTICE.md
+horizon-mod.toml   package manifest (id, version, api, [native] pin)
+Cargo.toml         the crate; depends on `horizon-mod-api` from the fetched SDK
+src/               lib.rs (the one `impl Hooks`), runtime.rs (pure logic + tests), glue
+assets/ data/      the content the package ships
+tools/             content generators and the e2e scenario
 ```
 
-The retired 0.1.0 tree (the `.hnmod`, its `mixins/`, `compatibility.json`, `rust-toolchain.toml`
-and the old `content/`) is evidence at
-`ports/_shared/evidence/createaddition/retired-hnmod-0.1.0/`.
+- Build: `cargo horizon-mod build` (packages; it does not compile against the game).
+- Test: `cargo test`, `cargo clippy --all-targets -- -D warnings`.
+- In-game: `ports/tools/launcher-game.sh run createaddition` in the campaign tree, or install the
+  `.hmod` and play; the harness scenario is `tools/e2e.sh`.
 
-## Build and check
-
-```sh
-cd ports/createaddition
-CARGO_INCREMENTAL=0 cargo test --offline                    # 41 tests
-CARGO_INCREMENTAL=0 cargo clippy --all-targets --offline -- -D warnings
-cargo fmt --check                                           # never --all: it formats the SDK
-rm -f Cargo.lock && cargo horizon-mod build                  # -> target/horizon-mod/createaddition.hmod
-cargo horizon-mod check createaddition.hmod
-cargo horizon-mod fits createaddition.hmod --build nightly
-```
-
-Every step above runs inside a campaign build slot (`ports/tools/build-slot.sh run --job … --port
-ports/createaddition --step …`) so the box-wide concurrency accounting keeps working; the port has no
-staging step, because the SDK crate is compiled in place against `.horizon/sdk/`.
-
-`cargo horizon-mod build` **packs**; it does not compile against the game. The native compile is
-`horizon-launcher native-build . --instance <i> --trust-native-code`, which is not installed here —
-so `tools/e2e.sh` needs a launcher-built game in `GAME=` and has not been run at this pin. It ends
-with `EXIT:<status>`, which `python3 ports/tools/check-e2e-logs.py createaddition --strict` reads.
+This repository is generated from the campaign's port at `ports/createaddition/`; the port's own
+`notes.md` is the full record (decisions, traps, evidence).

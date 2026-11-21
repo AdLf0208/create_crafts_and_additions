@@ -1,4 +1,61 @@
-# Validation — Create Crafts & Additions slice 1 and 2
+# Validation — Create Crafts & Additions slices 1–3
+
+## 0.2.3 — the three review fixes (PR #1526)
+
+Pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (nightly 2026-11-20), mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`; every cargo step inside one
+`ports/tools/build-slot.sh` lease (`CARGO_INCREMENTAL=0`, no `--target-dir`, `BUILD_LOCAL=1`).
+The in-game legs use the launcher-built game (`ports/tools/launcher-game.sh`, launcher 0.2.92);
+the script now honours `E2E_TMP` instead of hardcoding `/tmp`.
+
+Logs: `ports/_shared/evidence/createaddition/` (`tower-red.log`,
+`doctored-controller-red.log`, `licence-notice*.log`, `sdk-*.log`,
+`verify-sdk-package.log`, `probe-doctored.log`) and
+`ports/_shared/evidence/createaddition-e2e/` (`e2e-review-*.log`).
+
+```
+red, quadratic remainder scan   left: 8256, right: 4160          (tower-red.log)
+red, doctored saved 4x1          Tower { width: 4, height: 1 }    (tower-red.log)
+red, controller at i32::MAX      attempt to add with overflow     (doctored-controller-red.log)
+red, upstream notice absent      no LICENSE-UPSTREAM in the hmod  (licence-notice-red.log)
+cargo test --offline             56 passed, 0 failed              (sdk-test.log)
+cargo clippy --all-targets --offline -- -D warnings   exit 0, 0 warnings (sdk-clippy.log)
+cargo fmt --check                clean                            (sdk-fmt.log)
+rm -f Cargo.lock && cargo horizon-mod build           exit 0       (sdk-build.log)
+cargo horizon-mod build (again)  byte-identical (cmp)             (sdk-build-second.log)
+cargo horizon-mod check createaddition.hmod           exit 0       (sdk-check.log)
+fits --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a  "0a875da  made for" (sdk-fits-pin.log)
+fits --build 0b14f8acfd97fa2c750e42795249dcc981178ca4  "0b14f8a  fits"     (sdk-fits-other.log)
+python3 tools/check_licence.py    upstream notice verbatim        (licence-notice.log)
+python3 ports/tools/verify-sdk-package.py createaddition   1/1     (verify-sdk-package.log)
+```
+
+Deliverable: `createaddition.hmod`, **133,587 B**, SHA-256
+`1b29b731068bc6a2f21281fc88f60b7643b39f819a4a2f8885d0ad0818fe53d6`, **83 entries**, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too).
+
+```
+createaddition 0.2.3 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  133587 bytes, SHA-256 1b29b731068bc6a2f21281fc88f60b7643b39f819a4a2f8885d0ad0818fe53d6, unsigned
+```
+
+```
+Create Crafts & Additions:
+0a875da  made for
+Create Crafts & Additions:
+0b14f8a  fits
+```
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-review-default.log` | `PASS` + `EXIT:0` | A–H as 0.2.2, plus **G6**: a doctored `tw:4,th:1` and `tw:1000,th:1000` both read `123/2000000`, and the next pass re-forms the 1×1 |
+| `e2e-review-selftest.log` | `FAIL` + `EXIT:1` | the flipped conservation assertion trips |
+| `e2e-review-control.log` | `FAIL` + `EXIT:1` | the same item assertion on the package-less control game |
+| `probe-doctored.log` | `EXIT:0` | the saved compound is the block-entity NBT root (`/data merge block` works) and `/tick freeze` holds the pass off |
+
+`python3 ports/tools/check-e2e-logs.py createaddition createaddition-e2e --strict`:
+**logs=12 ok=12 missing-exit=0 bad-exit=0**.
 
 ## 0.2.2 — the accumulator multiblock, and the carried data's dialect
 

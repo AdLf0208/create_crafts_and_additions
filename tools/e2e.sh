@@ -55,7 +55,10 @@ PIN_BIN=$CLONE/ports/_shared/bin/horizon-1d63e0a5
 CTL=${CTL:-$PIN_BIN/horizon-ctl}
 GAME=${GAME:-}
 RES=${RES:-${HORIZON_RES:-/home/adlf/Desktop/horizon/.local/horizon-client/26.3}}
-SOCK=${SOCK:-/tmp/opencode/createaddition-e2e.sock}
+# `/tmp` is a 7.5 GB tmpfs; the launcher hands e2e runs a scratch root on /home via E2E_TMP.
+TMP=${E2E_TMP:-/tmp/opencode}
+mkdir -p "$TMP"
+SOCK=${SOCK:-$TMP/createaddition-e2e.sock}
 KEEP=${KEEP:-0}
 WORLD=CreateAdditionE2E
 CONTROL_WORLD=CreateAdditionControl
@@ -71,6 +74,11 @@ FAR_B=$((FAR_A + 17))
 # The large-connector pair: four blocks apart.
 BIG_A=$((X0 + 6))
 BIG_B=$((BIG_A + 4))
+# A clean stone pad for the loot leg: the arena floor has device blocks (connectors,
+# accumulators) replacing its stone, and a player teleported onto one of those can fall through
+# the partial-collision shape into the void. The loot test stands here instead.
+LOOT_X=$((X0 + 40))
+LOOT_Z=8
 TICKS=20
 RATE=1000
 SEED=100000
@@ -89,7 +97,7 @@ command -v jq >/dev/null || { echo "missing jq (every assertion parses a ctl rep
 [ -x "$GAME" ] || { echo "missing horizon-client: $GAME" >&2; guard; }
 [ -d "$RES/assets" ] || { echo "missing prepared resources: $RES" >&2; guard; }
 
-SCRATCH=$(mktemp -d /tmp/opencode/createaddition-home.XXXXXX)
+SCRATCH=$(mktemp -d "$TMP/createaddition-home.XXXXXX")
 export HORIZON_HOME=$SCRATCH/game
 export HORIZON_LAUNCHER_HOME=$SCRATCH/launcher
 export XDG_DATA_HOME=$SCRATCH/data
@@ -165,6 +173,9 @@ arena() {
     ctl command "execute in minecraft:the_end run fill $((X0 - 20)) 100 -14 $((X0 + 30)) 100 14 minecraft:stone" >/dev/null
     ctl wait 6 >/dev/null
     ctl command "execute in minecraft:the_end run fill $((X0 - 20)) 101 -14 $((X0 + 30)) 108 14 minecraft:air" >/dev/null
+    # The loot pad: all stone, away from every device block.
+    ctl command "execute in minecraft:the_end run fill $((LOOT_X - 2)) 100 $((LOOT_Z - 2)) $((LOOT_X + 4)) 100 $((LOOT_Z + 2)) minecraft:stone" >/dev/null
+    ctl command "execute in minecraft:the_end run fill $((LOOT_X - 2)) 101 $((LOOT_Z - 2)) $((LOOT_X + 4)) 104 $((LOOT_Z + 2)) minecraft:air" >/dev/null
     ctl wait 6 >/dev/null
     ctl command "execute in minecraft:the_end run kill @e[type=!player]" >/dev/null
     ctl command "execute in minecraft:the_end run tp @s $X0.5 101 0.5" >/dev/null
@@ -216,6 +227,36 @@ info() { # info X Y Z
     INFO_LINE=$REPLY
     eval "$(python3 "$PORT/tools/parse_info.py" "$INFO_LINE")"
     [ "${ok:-0}" = 1 ] || fail "the info line did not parse: $INFO_LINE"
+    echo "  $INFO_LINE" >&2
+}
+
+# While `/tick freeze` holds the level pass off, `ctl wait` counts game ticks and would never
+# return: poll the chat log by wall clock instead.
+frozen_command_reply() { # frozen_command_reply COMMAND REPLY_PATTERN
+    NEXT_TAG=$((NEXT_TAG + 1))
+    local tag pattern
+    tag="q$NEXT_TAG"
+    pattern="$2 .*\\[#$tag\\]$"
+    say "$1 #$tag"
+    for _ in $(seq 1 50); do
+        if chat | grep -qE "$pattern"; then
+            REPLY=$(chat | grep -E "$pattern" | tail -1)
+            REPLY=${REPLY% "[#$tag]"}
+            REPLY=${REPLY% }
+            return 0
+        fi
+        sleep 0.2
+    done
+    echo "--- newest chat lines:" >&2
+    chat | tail -15 >&2
+    fail "no reply to /$1 #$tag while the game was frozen"
+}
+
+frozen_info() { # frozen_info X Y
+    frozen_command_reply "createaddition info $1 $2 0" "^(Connector|Large Connector|Modular Accumulator) at $1,$2,0:"
+    INFO_LINE=$REPLY
+    eval "$(python3 "$PORT/tools/parse_info.py" "$INFO_LINE")"
+    [ "${ok:-0}" = 1 ] || fail "the frozen info line did not parse: $INFO_LINE"
     echo "  $INFO_LINE" >&2
 }
 
@@ -321,7 +362,8 @@ break_drop_leg() { # break_drop_leg BLOCK -> sets DROPPED
     ctl command "item replace entity @s hotbar.0 with minecraft:iron_pickaxe 1" >/dev/null
     ctl select 1 >/dev/null
     ctl command "gamemode survival" >/dev/null
-    ctl wait 2 >/dev/null
+    ctl command "execute in minecraft:the_end run tp @s $LOOT_X.5 101 $LOOT_Z.5" >/dev/null
+    ctl wait 6 >/dev/null
     read -r px py pz <<<"$(player_block)"
     at=$((px + 1))
     ctl command "execute at @s run setblock ~1 ~ ~ $block" >/dev/null
@@ -330,10 +372,19 @@ break_drop_leg() { # break_drop_leg BLOCK -> sets DROPPED
         || fail "the drop-test $block did not place at $at,$py,$pz"
     before=$(item_held "$block")
     ctl break "$at" "$py" "$pz" >/dev/null
-    ctl wait 30 >/dev/null
+    # Stand on the drop (the block was just removed, so the cell is air over the floor): pickup
+    # must not depend on the item settling at the edge of the one-block pickup radius.
+    ctl command "tp @s $at.5 $py.5 $pz.5" >/dev/null
+    # Pickup is a server tick after the drop: poll for it (bounded) instead of reading one
+    # instant. A wrong loot table never raises the count, so the assertion below still fails.
+    after=$before
+    for _ in $(seq 1 40); do
+        ctl wait 2 >/dev/null
+        after=$(item_held "$block")
+        [ "$after" -gt "$before" ] && break
+    done
     [ "$(block_name "$at" "$py" "$pz")" = "minecraft:air" ] \
         || fail "the $block at $at,$py,$pz did not break (state $(block_name "$at" "$py" "$pz"))"
-    after=$(item_held "$block")
     DROPPED=$((after - before))
     echo "  $block: broke and dropped $DROPPED (held $before -> $after)" >&2
 }
@@ -644,6 +695,49 @@ if [ "$SELFTEST" = 1 ]; then
     [ "$capacity" = 4000000 ] || fail "SELFTEST: the tower assertion did not trip (capacity $capacity)"
 fi
 
+echo "== G6: a doctored saved tower is refused before capacity arithmetic =="
+# The block entity's saved compound IS its NBT root (`tw`/`th`/`tx`/`ty`/`tz`, `energy`), so a
+# save can be edited with vanilla `/data merge block`. A shape outside the 3x3x5 limit must be
+# read as the block's own single: `1000*1000*1000` would overflow the capacity and make
+# `members()` allocate a billion entries. `tick freeze` holds the level pass (which would
+# re-form the tower) off so the read sees the doctored data; the probe in
+# `ports/_shared/evidence/createaddition/probe-doctored.log` established both facts.
+DOCTOR=$((X0 + 24))
+place_accumulator "$DOCTOR" 100
+ctl wait 8
+expect_bits "$DOCTOR" 100 true true
+command_reply "createaddition energy $DOCTOR 100 0 123" "$ENERGY_REPLY"
+tower_info "$DOCTOR" 100
+[ "$capacity" = 2000000 ] && [ "$energy" = 123 ] \
+    || fail "the fresh doctor block reads $energy/$capacity, expected 123/2000000"
+ctl command "execute in minecraft:the_end run tp @s $DOCTOR.5 101 0.5" >/dev/null
+ctl wait 4
+ctl command "tick freeze" >/dev/null
+ctl command "execute in minecraft:the_end run data merge block $DOCTOR 100 0 {tw:4,th:1,tx:$DOCTOR,ty:100,tz:0}" >/dev/null
+ctl command "execute in minecraft:the_end run data get block $DOCTOR 100 0" \
+    | jq -e '.chat[0] | contains("tw: 4") and contains("th: 1")' >/dev/null \
+    || fail "the doctored 4x1 tower was not written into the block entity"
+frozen_info "$DOCTOR" 100
+[ "$capacity" = 2000000 ] && [ "$energy" = 123 ] \
+    || fail "a doctored 4x1 save reads $energy/$capacity, not the block's own 123/2000000"
+case "$INFO_LINE" in
+    *"tower 4x1"*) fail "the readout echoed the doctored 4x1 tower" ;;
+esac
+# The 1000x1000 shape is the same code path the unit tests measure without a game (capacity
+# overflow and a billion-entry `members()` on the old code); assert the live read stays single.
+ctl command "execute in minecraft:the_end run data merge block $DOCTOR 100 0 {tw:1000,th:1000,tx:$DOCTOR,ty:100,tz:0}" >/dev/null
+frozen_info "$DOCTOR" 100
+[ "$capacity" = 2000000 ] && [ "$energy" = 123 ] \
+    || fail "a doctored 1000x1000 save reads $energy/$capacity, not the block's own 123/2000000"
+echo "  doctored tw/th 4x1 and 1000x1000 both read as the block's own 123/2000000" >&2
+ctl command "tick unfreeze" >/dev/null
+# The next pass re-forms the legal single: the doctored shape does not survive it.
+ctl wait 8
+expect_bits "$DOCTOR" 100 true true
+tower_info "$DOCTOR" 100
+[ "$capacity" = 2000000 ] || fail "the doctored tower survived the pass ($capacity)"
+echo "  the next pass re-formed it as a 1x1 single" >&2
+
 echo "== H: every block's loot table drops the block itself (the 26.3 dialect) =="
 # 1.21.1 writes a pool's condition as `"conditions": [ {...} ]` with the kind under
 # `"condition"`; 26.3's own tables (the prepared resources) write one `"condition":
@@ -657,4 +751,4 @@ for LOOT_BLOCK in createaddition:connector createaddition:large_connector create
 done
 echo "  all three blocks drop one of themselves through their 26.3 loot tables" >&2
 
-echo "PASS: FE crossed the wire at 1,000/t and was conserved, an unlinked connector moved nothing, the 16-block limit held, copper was refused between two large connectors, an accumulator fed the block above it, a three-high tower formed one 6,000,000 FE pool, a broken tower re-formed at 4,000,000, and separated accumulators stayed singles, and every block drops itself"
+echo "PASS: FE crossed the wire at 1,000/t and was conserved, an unlinked connector moved nothing, the 16-block limit held, copper was refused between two large connectors, an accumulator fed the block above it, a three-high tower formed one 6,000,000 FE pool, a broken tower re-formed at 4,000,000, separated accumulators stayed singles, a doctored saved tower was refused as its block's own single, and every block drops itself"

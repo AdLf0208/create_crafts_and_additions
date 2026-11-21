@@ -1,7 +1,15 @@
 # Licence notice — Create Crafts & Additions (Horizon port)
 
 - **Upstream:** Create Crafts & Additions `1.7.2`, `MRH0/createaddition` on
-  GitHub, © MRH0.
+  GitHub (`https://github.com/MRH0/createaddition`), © MRH0 (the copyright
+  line reads "Copyright (c) 2024 MRH").
+- **The original MIT notice travels in this package:** [`LICENSE-UPSTREAM`](LICENSE-UPSTREAM)
+  is the upstream `LICENSE` file carried verbatim from the pinned commit
+  `658a390b8ff4daa17013e9447b29949330c8a42a`, so the upstream copyright and
+  permission notice are redistributed with the code and the carried art. (Its
+  trailing audio note is part of the upstream file; this port carries no audio.)
+  [`LICENSE`](LICENSE) is this port's own MIT grant, which keeps the upstream
+  copyright line beside the port's.
 - **Licence read from the artefact:** `license="MIT"` in the jar's
   `META-INF/neoforge.mods.toml` (`ports/_shared/licence-cache/createaddition-1.7.2.jar`,
   SHA-256 of the file recorded in `notes.md`). The jar carries no separate

@@ -11,10 +11,11 @@ rewrite, see `FINDINGS.md`).
 **LOCAL-ONLY** until the maintainer approves publishing (ARCHITECTURE.md §8).
 MIT is licence rank 0 (permissive); the approval is still required.
 
-Status: **slice 1 implemented and delivered as a flat SDK package (mod API 0.2),
-version 0.2.0** — the two connectors, wire links and the modular accumulator, with the jar's
-rates and connection rules, in one `createaddition.hmod` that carries the code *and* the
-content. The 0.1.0 `.hnmod` was retired by Horizon's mod-API merge (#16941); the migration is
+Status: **slice 1 implemented and delivered as a flat SDK package (mod API 0.2), version
+0.2.3** — the two connectors, wire links and the modular accumulator, with the jar's rates and
+connection rules, in one `createaddition.hmod` that carries the code *and* the content. (0.2.0
+was the migration; 0.2.2 the tower; 0.2.3 the three review fixes, §
+[`## Review fixes — 0.2.3`](#review-fixes--023-pr-1526-2026-11-21).) The 0.1.0 `.hnmod` was retired by Horizon's mod-API merge (#16941); the migration is
 [`## Migration to the SDK format`](#migration-to-the-sdk-format), and the 0.1.0 in-game evidence
 stays historical because no launcher exists at this pin (`## Gaps`).
 
@@ -658,5 +659,177 @@ bad-exit=0**.
 4. **The plan is deterministic where upstream is greedy per placed block.** `plan_towers` anchors
    on the lowest free block and repeats, so an L-shape always splits the same way; upstream's
    `PriorityQueue` over candidate controllers happens to agree on the boxes this slice forms.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review
+
+---
+
+## Review fixes — 0.2.3 (PR #1526, 2026-11-21)
+
+Three package findings from the reviewer (`levzzz5154`). Each was made red first; the reds are
+quoted verbatim from this tree's logs (`ports/_shared/evidence/createaddition/`).
+
+### 1. The tower plan was quadratic
+
+`plan_towers` found each next anchor with `left.iter().min_by_key(|pos| (pos[1], pos[0], pos[2]))`
+over the whole remainder, once per tower. `n` disconnected accumulators therefore cost
+`n + (n-1) + … + 1 = n(n+1)/2` position examinations — the remainder was rescanned for every
+disconnected block.
+
+**Fix.** The remainder is an **ordered anchor set**: `Anchors` wraps a `BTreeSet<Anchor>`, and
+`Anchor`'s `Ord` is `(y, x, z)` — upstream's controller order. `Anchors::first` takes the lowest
+anchor with one set lookup and leaves it in the set so its own box can include it; every planned
+member is removed once. One pass is now `n` anchor lookups + `n` removals + a constant number of
+box probes per anchor (six for a disconnected singleton: `1×1` probes twice, `2×2`/`3×3` twice
+each), so `O(n log n)` with a linear lookup count, never a remainder scan.
+
+**Red** (`tower-red.log`), against the old remainder scan:
+
+```
+thread 'network::tests::the_tower_plan_is_linear_in_the_number_of_disconnected_accumulators' (2586304) panicked at src/network.rs:2204:5:
+assertion `left == right` failed: doubling the accumulators must double the anchor work; rescanning the remainder for every disconnected accumulator would quadruple it
+  left: 8256
+ right: 4160
+```
+
+**The work-unit assertion** (`network.rs`, `the_tower_plan_is_linear_in_the_number_of_disconnected_accumulators`) —
+set lookups, not a wall clock, so a faster machine cannot change it:
+
+```rust
+assert_eq!(
+  doubled.anchors,
+  2 * base.anchors,
+  "doubling the accumulators must double the anchor work; rescanning the remainder for \
+   every disconnected accumulator would quadruple it"
+);
+assert_eq!(base.anchors, 64, "one anchor taken per accumulator");
+assert_eq!(base.removals, 64, "one member removed per accumulator");
+// ...
+assert_eq!(base, Lookups { anchors: 64, probes: 384, removals: 64 });
+assert_eq!(doubled, Lookups { anchors: 128, probes: 768, removals: 128 });
+```
+
+So 64 disconnected accumulators take **512** set lookups and 128 take **1024** — exactly double;
+the old scan took 8,256 anchor examinations at 128, which is why the red shows 8256 against 4160.
+`Lookups` is a test-only meter (`Work` trait; production uses the no-op `Silent`), so the shipped
+pass pays nothing for the proof. The formation result is unchanged: G/G2–G5 still form the same
+3×3×5 boxes (the anchor order is the old `min_by_key` order).
+
+### 2. A doctored saved tower was trusted before arithmetic
+
+`tower_saved` accepted any `tw`/`th` >= 1 and only then called `tower.contains`; `Tower::capacity`
+multiplied `width² × height × 2,000,000`, `members()` built a `Vec::with_capacity(blocks)`, and
+`contains` added `controller + width` in `i32`. A save edited with `/data merge block` (the block
+entity's saved compound **is** its NBT root: `{tw, th, tx, ty, tz, …, energy}`) could request
+`1000×1000×1000` blocks, overflow the capacity, or overflow the coordinate box.
+
+**Fix.** `tower_saved` rejects `width` outside `1..=3` or `height` outside `1..=5` **before** reading
+the controller, before `contains`, `capacity` or `members`, and falls back to `Tower::single(pos)`
+(the block's own 2,000,000 FE). `Tower::contains` compares in `i64`, so a legal 3×1 box whose
+`controller + width` would cross `i32::MAX` cannot overflow either.
+
+**Reds** (`tower-red.log`, `doctored-controller-red.log`):
+
+```
+thread 'network::tests::a_saved_tower_beyond_the_limit_is_read_as_a_single_block' (2586290) panicked at src/network.rs:2170:7:
+assertion `left == right` failed: a saved 4x1 tower must be refused before any arithmetic
+  left: Tower { controller: [4, 70, 9], width: 4, height: 1 }
+ right: Tower { controller: [4, 70, 9], width: 1, height: 1 }
+```
+
+```
+thread 'network::tests::a_saved_controller_past_the_coordinate_limit_does_not_overflow' (2586844) panicked at src/network.rs:1137:19:
+attempt to add with overflow
+```
+
+**In-game proof** (`e2e-review-default.log`, G6): a real accumulator is seeded with 123 FE, then,
+with the level frozen (`/tick freeze`, so the pass cannot rewrite it first), its block entity is
+doctored to `tw:4,th:1` and then `tw:1000,th:1000`. Both read as the block's own single:
+
+```
+== G6: a doctored saved tower is refused before capacity arithmetic ==
+  Modular Accumulator at 224,100,0: 123/2000000 FE (t=1079)
+  Modular Accumulator at 224,100,0: 123/2000000 FE (t=1093)
+  doctored tw/th 4x1 and 1000x1000 both read as the block's own 123/2000000
+  the next pass re-formed it as a 1x1 single
+```
+
+Pre-fix, the 4×1 read would report `123/32000000` (4×4×1×2,000,000) and the 1000×1000 read would
+allocate a billion `members()` entries. After unfreeze the next pass re-forms the legal 1×1, which
+the leg asserts too.
+
+### 3. The original MIT notice now travels in the package
+
+**Red** (`licence-notice-red.log`): the 0.2.2 package carried only this port's `LICENSE` (which
+paraphrased the copyright line), not the upstream notice:
+
+```
+FAIL: createaddition.hmod carries no LICENSE-UPSTREAM (the upstream MIT notice)
+```
+
+**Fix.** `LICENSE-UPSTREAM` is the upstream `LICENSE` file carried **verbatim** from the pinned
+commit `658a390b8ff4daa17013e9447b29949330c8a42a` (`Copyright (c) 2024 MRH` plus the MIT grant);
+the packer includes it (83 entries now). `LICENSE` remains this port's grant with the upstream
+copyright beside it, `LICENSE-NOTICE.md` and `README.md` name `LICENSE-UPSTREAM`, and
+`tools/check_licence.py` re-checks the packed bytes against the tree copy and the copyright line
+(green: `ok createaddition.hmod carries the upstream MIT notice verbatim (1242 B, 'Copyright (c) 2024 MRH')`).
+
+**Listing credit** (for `mods/createaddition.toml`, owned by the orchestrator): upstream author
+**MRH0** — the copyright line reads "Copyright (c) 2024 MRH" — at
+**https://github.com/MRH0/createaddition**.
+
+### The 0.2.3 ladder
+
+| Step | Command | Result |
+|---|---|---|
+| tests | `cargo test --offline` | **56 passed**, 0 failed (`sdk-test.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| formatting | `cargo fmt --check` | clean (`sdk-fmt.log`) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` | `target/horizon-mod/createaddition.hmod`, exit 0 (`sdk-build.log`) |
+| package, second build | same again | **byte-identical** (`cmp`) (`sdk-build-second.log`) |
+| registry check | `cargo horizon-mod check createaddition.hmod` | exit 0 (`sdk-check.log`) |
+| fits, campaign pin | `cargo horizon-mod fits createaddition.hmod --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a` | `0a875da  made for`, exit 0 (`sdk-fits-pin.log`) |
+| fits, another build | `… --build 0b14f8acfd97fa2c750e42795249dcc981178ca4` | `0b14f8a  fits`, exit 0 (`sdk-fits-other.log`) |
+| licence notice | `python3 tools/check_licence.py` | `ok … carries the upstream MIT notice verbatim`, exit 0 (`licence-notice.log`) |
+| package verifier | `python3 ports/tools/verify-sdk-package.py createaddition` | **1/1** (`verify-sdk-package.log`) |
+
+Deliverable: **`createaddition.hmod`, 133,587 B, SHA-256
+`1b29b731068bc6a2f21281fc88f60b7643b39f819a4a2f8885d0ad0818fe53d6`**, 83 entries, reproducible (two
+builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too).
+
+```
+createaddition 0.2.3 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  133587 bytes, SHA-256 1b29b731068bc6a2f21281fc88f60b7643b39f819a4a2f8885d0ad0818fe53d6, unsigned
+```
+
+```
+Create Crafts & Additions:
+0a875da  made for
+Create Crafts & Additions:
+0b14f8a  fits
+```
+
+In-game (launcher-built game at `0a875da`, launcher 0.2.92, `E2E_TMP` honoured — the script no
+longer hardcodes `/tmp`):
+
+| log | verdict | what it adds |
+|---|---|---|
+| `e2e-review-default.log` | `PASS` + `EXIT:0` | A–H unchanged, plus **G6**: the doctored 4×1 and 1000×1000 saves read as `123/2000000`, and the next pass re-forms the 1×1 |
+| `e2e-review-selftest.log` | `FAIL` + `EXIT:1` | `SELFTEST: the conservation assertion did not trip` |
+| `e2e-review-control.log` | `FAIL` + `EXIT:1` | the same item assertion on the package-less control game |
+| `probe-doctored.log` | `EXIT:0` | established the saved-compound NBT path and that `/tick freeze` holds the pass off |
+
+`python3 ports/tools/check-e2e-logs.py createaddition createaddition-e2e --strict`:
+**logs=12 ok=12 missing-exit=0 bad-exit=0**.
+
+### Coverage added by this slice
+
+| family | status |
+|---|---|
+| tower plan work, linear in the accumulators | **tested** — `the_tower_plan_is_linear_…` (exact `Lookups` 64→512, 128→1024; red was 8256 vs 4160) |
+| a saved shape outside 3×3×5 | **tested** — `a_saved_tower_beyond_the_limit_is_read_as_a_single_block` (dims 4×1, 1×6, 1000×1000, `i32::MAX`, 0, negative) + G6 |
+| a saved controller at the coordinate limit | **tested** — `a_saved_controller_past_the_coordinate_limit_does_not_overflow` (i64 box test; red was `attempt to add with overflow`) |
+| the upstream MIT notice in the package | **tested** — `tools/check_licence.py` (packed bytes == tree copy; `Copyright (c) 2024 MRH`) |
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review

@@ -71,7 +71,7 @@ reply repeats as ` [#tag]` so a harness can tell answers apart. The readout text
 ## Layout
 
 ```
-horizon-mod.toml               the only manifest and identity: id, version 0.2.0, api 0.2, [native]
+horizon-mod.toml               the only manifest and identity: id, version 0.2.3, api 0.2, [native]
 Cargo.toml                     one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 rustfmt.toml                   tab_spaces = 2, the campaign's style
 src/lib.rs                     the one impl Hooks: register, level_tick_post, commands
@@ -85,8 +85,11 @@ tools/
   parse_info.py                `/createaddition info` line -> shell fields
   e2e.sh                       the in-game scenario (PASS + EXIT:<status>)
 notes.md, FINDINGS.md, VALIDATION.md, CONTENT.md, AGENTS.md
-LICENSE, LICENSE-NOTICE.md
+LICENSE, LICENSE-UPSTREAM, LICENSE-NOTICE.md
 ```
+
+`LICENSE-UPSTREAM` is the upstream MIT notice carried verbatim; `LICENSE` is this port's grant,
+which keeps the upstream copyright line.
 
 The retired 0.1.0 tree (the `.hnmod`, its `mixins/`, `compatibility.json`, `rust-toolchain.toml`
 and the old `content/`) is evidence at

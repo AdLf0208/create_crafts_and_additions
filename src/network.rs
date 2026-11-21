@@ -12,6 +12,7 @@
 //! that level this tick. The SDK cannot enumerate a level's block entities, which is why the
 //! queue exists at all.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -1131,14 +1132,18 @@ impl Tower {
     self.controller[1] + self.height - 1
   }
 
-  /// Whether `pos` is one of the tower's blocks.
+  /// Whether `pos` is one of the tower's blocks. The comparison widens to `i64` so a saved
+  /// controller near `i32::MAX` cannot overflow `controller + width` before the box is refused.
   fn contains(self, pos: Pos) -> bool {
-    pos[0] >= self.controller[0]
-      && pos[0] < self.controller[0] + self.width
-      && pos[2] >= self.controller[2]
-      && pos[2] < self.controller[2] + self.width
-      && pos[1] >= self.controller[1]
-      && pos[1] <= self.top()
+    let [x, y, z] = self.controller;
+    let (x, y, z) = (i64::from(x), i64::from(y), i64::from(z));
+    let (px, py, pz) = (i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2]));
+    px >= x
+      && px < x + i64::from(self.width)
+      && pz >= z
+      && pz < z + i64::from(self.width)
+      && py >= y
+      && py < y + i64::from(self.height)
   }
 
   /// The tower's blocks, lowest layer first, the controller's own column before the others: the
@@ -1166,10 +1171,109 @@ impl Tower {
   }
 }
 
+/// An accumulator position ordered the way the plan takes anchors: lowest layer first, then x,
+/// then z (upstream's controller order). A `BTreeSet` of these is the ordered anchor set, so the
+/// pass takes the next anchor with one lookup instead of rescanning the remainder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Anchor(Pos);
+
+impl Ord for Anchor {
+  fn cmp(&self, other: &Self) -> Ordering {
+    (self.0[1], self.0[0], self.0[2]).cmp(&(other.0[1], other.0[0], other.0[2]))
+  }
+}
+
+impl PartialOrd for Anchor {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
+/// Counts the ordered-set lookups a plan performs. Production uses [`Silent`] (no counter); the
+/// linearity test uses [`Lookups`], so its evidence is a work unit and never a wall clock.
+trait Work {
+  /// The plan took the next anchor from the ordered set.
+  fn anchor(&mut self) {}
+  /// The plan probed one cell of a candidate box.
+  fn probe(&mut self) {}
+  /// The plan removed one member from the ordered set.
+  fn remove(&mut self) {}
+}
+
+/// The production meter: a plan's work is not needed at run time, so nothing is counted.
+struct Silent;
+
+impl Work for Silent {}
+
+/// The set lookups one plan performed, as the linearity test's work unit.
+#[cfg(test)]
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Lookups {
+  /// Anchors taken, one per tower planned.
+  anchors: usize,
+  /// Candidate-box cells probed.
+  probes: usize,
+  /// Members removed.
+  removals: usize,
+}
+
+#[cfg(test)]
+impl Work for Lookups {
+  fn anchor(&mut self) {
+    self.anchors += 1;
+  }
+  fn probe(&mut self) {
+    self.probes += 1;
+  }
+  fn remove(&mut self) {
+    self.removals += 1;
+  }
+}
+
+#[cfg(test)]
+impl Lookups {
+  fn total(&self) -> usize {
+    self.anchors + self.probes + self.removals
+  }
+}
+
+/// The ordered anchor set of one plan, with the meter it reports to.
+struct Anchors<W: Work> {
+  set: BTreeSet<Anchor>,
+  work: W,
+}
+
+impl<W: Work> Anchors<W> {
+  fn new(positions: &BTreeSet<Pos>, work: W) -> Self {
+    Self {
+      set: positions.iter().copied().map(Anchor).collect(),
+      work,
+    }
+  }
+
+  /// The lowest remaining anchor, one ordered-set lookup. It stays in the set so the box that
+  /// starts at it can include it.
+  fn first(&mut self) -> Option<Pos> {
+    let anchor = self.set.first().copied()?;
+    self.work.anchor();
+    Some(anchor.0)
+  }
+
+  fn contains(&mut self, pos: Pos) -> bool {
+    self.work.probe();
+    self.set.contains(&Anchor(pos))
+  }
+
+  fn remove(&mut self, pos: Pos) {
+    self.work.remove();
+    self.set.remove(&Anchor(pos));
+  }
+}
+
 /// The largest tower anchored at `anchor` whose blocks are all in `available`: upstream's
 /// `tryToFormNewMulti`, which tries every width up to 3 and keeps the biggest box, a wider one
 /// on a tie.
-fn largest_tower(available: &BTreeSet<Pos>, anchor: Pos) -> Tower {
+fn largest_tower<W: Work>(available: &mut Anchors<W>, anchor: Pos) -> Tower {
   let mut best = Tower::single(anchor);
   for width in 1..=TOWER_WIDTH {
     let mut height = 0;
@@ -1177,7 +1281,7 @@ fn largest_tower(available: &BTreeSet<Pos>, anchor: Pos) -> Tower {
       for x in 0..width {
         for z in 0..width {
           let at = [anchor[0] + x, anchor[1] + step, anchor[2] + z];
-          if !available.contains(&at) {
+          if !available.contains(at) {
             break 'layers;
           }
         }
@@ -1197,28 +1301,44 @@ fn largest_tower(available: &BTreeSet<Pos>, anchor: Pos) -> Tower {
 }
 
 /// Every accumulator of `positions` and the tower it belongs to, each tower anchored at the
-/// lowest free corner and filled greedily (upstream's own `formMulti` order).
-fn plan_towers(positions: &BTreeSet<Pos>) -> BTreeMap<Pos, Tower> {
-  let mut left = positions.clone();
+/// lowest remaining block and filled greedily (upstream's own `formMulti` order). The ordered
+/// anchor set makes one pass linear in the accumulators: one anchor lookup and one removal per
+/// member, plus a constant number of box probes per tower — the remainder is never rescanned.
+fn plan_towers_with<W: Work>(positions: &BTreeSet<Pos>, work: W) -> (BTreeMap<Pos, Tower>, W) {
+  let mut left = Anchors::new(positions, work);
   let mut planned = BTreeMap::new();
-  while let Some(anchor) = left
-    .iter()
-    .min_by_key(|pos| (pos[1], pos[0], pos[2]))
-    .copied()
-  {
-    let tower = largest_tower(&left, anchor);
+  while let Some(anchor) = left.first() {
+    let tower = largest_tower(&mut left, anchor);
     for member in tower.members() {
-      left.remove(&member);
+      left.remove(member);
       planned.insert(member, tower);
     }
   }
-  planned
+  (planned, left.work)
+}
+
+/// Every accumulator of `positions` and the tower it belongs to.
+fn plan_towers(positions: &BTreeSet<Pos>) -> BTreeMap<Pos, Tower> {
+  plan_towers_with(positions, Silent).0
+}
+
+/// The counted variant of [`plan_towers`], for the linearity test only.
+#[cfg(test)]
+fn plan_towers_counted(positions: &BTreeSet<Pos>) -> (BTreeMap<Pos, Tower>, Lookups) {
+  plan_towers_with(positions, Lookups::default())
 }
 
 /// The tower a saved compound names, or the block's own single when it names none yet.
 fn tower_saved(nbt: &Compound, pos: Pos) -> Tower {
   let width = int_at(nbt, TOWER_SAVED_WIDTH);
   let height = int_at(nbt, TOWER_SAVED_HEIGHT);
+  // A save can be edited, so the shape is checked against the 3x3x5 limit *before* any
+  // coordinate or capacity arithmetic: a doctored width/height could otherwise overflow
+  // `capacity`, allocate an enormous `members()` vector, or make `controller + width` overflow.
+  // An out-of-range shape is read as the block's own single, never multiplied.
+  if !(1..=TOWER_WIDTH).contains(&width) || !(1..=TOWER_HEIGHT).contains(&height) {
+    return Tower::single(pos);
+  }
   let controller = [
     int_at(nbt, TOWER_SAVED_X),
     int_at(nbt, TOWER_SAVED_Y),
@@ -1229,7 +1349,7 @@ fn tower_saved(nbt: &Compound, pos: Pos) -> Tower {
     width,
     height,
   };
-  if width >= 1 && height >= 1 && tower.contains(pos) {
+  if tower.contains(pos) {
     tower
   } else {
     Tower::single(pos)
@@ -2096,6 +2216,122 @@ mod tests {
       },
     );
     assert!(!tower_is_saved(&elsewhere, tower));
+  }
+
+  /// A block entity compound naming a tower, as a doctored save can: `save_tower` writes any
+  /// shape the planner could hand it, and the test deliberately hands it shapes the planner
+  /// never builds.
+  fn tower_nbt(controller: Pos, width: i32, height: i32) -> Compound {
+    let mut nbt = Compound::new();
+    save_tower(
+      &mut nbt,
+      Tower {
+        controller,
+        width,
+        height,
+      },
+    );
+    nbt
+  }
+
+  #[test]
+  fn a_saved_tower_beyond_the_limit_is_read_as_a_single_block() {
+    let pos = [4, 70, 9];
+    for (width, height) in [
+      (TOWER_WIDTH + 1, 1),
+      (1, TOWER_HEIGHT + 1),
+      (1_000, 1_000),
+      (i32::MAX, i32::MAX),
+      (0, 1),
+      (1, 0),
+      (-3, 5),
+    ] {
+      let nbt = tower_nbt(pos, width, height);
+      let tower = tower_saved(&nbt, pos);
+      assert_eq!(
+        tower,
+        Tower::single(pos),
+        "a saved {width}x{height} tower must be refused before any arithmetic"
+      );
+      assert_eq!(tower.blocks(), 1, "width {width} height {height}");
+      assert_eq!(
+        tower.capacity(),
+        ACCUMULATOR_CAPACITY,
+        "width {width} height {height}"
+      );
+      assert_eq!(tower.members(), vec![pos], "width {width} height {height}");
+    }
+  }
+
+  #[test]
+  fn a_saved_controller_past_the_coordinate_limit_does_not_overflow() {
+    // A legal box whose `controller + width` would overflow i32 (`i32::MAX - 2 + 3`): the read
+    // must not panic, and the tower it returns must have sane arithmetic.
+    let pos = [i32::MAX, 64, 0];
+    let nbt = tower_nbt([i32::MAX - 2, 64, 0], TOWER_WIDTH, 1);
+    let tower = tower_saved(&nbt, pos);
+    assert_eq!((tower.width, tower.height), (TOWER_WIDTH, 1));
+    assert_eq!(
+      tower.capacity(),
+      TOWER_WIDTH * TOWER_WIDTH * ACCUMULATOR_CAPACITY
+    );
+    assert_eq!(
+      tower.members().len(),
+      usize::try_from(TOWER_WIDTH * TOWER_WIDTH).unwrap()
+    );
+
+    // A controller nowhere near the block is refused, however large its coordinates.
+    let elsewhere = tower_nbt([i32::MAX, i32::MAX, i32::MAX], TOWER_WIDTH, TOWER_HEIGHT);
+    let pos = [0, 64, 0];
+    assert_eq!(tower_saved(&elsewhere, pos), Tower::single(pos));
+  }
+
+  /// `count` accumulator blocks five apart on one layer: no two can form a box, so the plan
+  /// makes `count` towers of one.
+  fn disconnected(count: i32) -> BTreeSet<Pos> {
+    (0..count).map(|i| [i * 5, 64, 0]).collect()
+  }
+
+  #[test]
+  fn the_tower_plan_is_linear_in_the_number_of_disconnected_accumulators() {
+    let base = plan_towers_counted(&disconnected(64)).1;
+    let doubled = plan_towers_counted(&disconnected(128)).1;
+    assert_eq!(
+      doubled.anchors,
+      2 * base.anchors,
+      "doubling the accumulators must double the anchor work; rescanning the remainder for \
+       every disconnected accumulator would quadruple it"
+    );
+    assert_eq!(base.anchors, 64, "one anchor taken per accumulator");
+    assert_eq!(base.removals, 64, "one member removed per accumulator");
+    assert_eq!(
+      doubled.probes,
+      2 * base.probes,
+      "the box probes are a constant per anchor"
+    );
+    assert_eq!(
+      doubled.total(),
+      2 * base.total(),
+      "the whole plan is linear: 64 accumulators take {base:?}, 128 take {doubled:?}"
+    );
+    // The exact work units, so a regression to a remainder scan is caught by a number and not
+    // only by a ratio: each disconnected block costs one anchor, six box probes and one removal.
+    assert_eq!(
+      base,
+      Lookups {
+        anchors: 64,
+        probes: 384,
+        removals: 64,
+      }
+    );
+    assert_eq!(
+      doubled,
+      Lookups {
+        anchors: 128,
+        probes: 768,
+        removals: 128,
+      }
+    );
   }
 
   fn wire(pos: Pos) -> SavedWire {

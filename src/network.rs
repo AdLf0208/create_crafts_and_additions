@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use mod_api::{
-  self, BlockEntityPart, BlockEntityTickEvent, BlockEntityTicksEvent, BlockKey, BlockPart,
+  self, BlockEntityPart, BlockEntityTickEvent, BlockEntityTicksEvent, BlockKey, BlockPart, Command,
   CommandArgumentValue, CommandInvocation, Compound, Direction, ENERGY, Host, HostTransaction,
   InteractionResult, ItemKey, ItemPlace, ItemResource, ItemStack, LevelRef, ModEnergyBuffer,
   ServerHost, StateForPlacementEvent, Tag, Text, UseItemOnEvent, move_energy,
@@ -55,6 +55,13 @@ const NET_NEXT: &str = "netNext";
 const NET_DEMAND: &str = "netDemand";
 /// The saved wire list of a connector.
 const LINKS: &str = "links";
+/// The tower an accumulator block belongs to: its shape and its controller's position, saved in
+/// each member's compound so a block answers for the tower it was last formed into.
+const TOWER_SAVED_WIDTH: &str = "tw";
+const TOWER_SAVED_HEIGHT: &str = "th";
+const TOWER_SAVED_X: &str = "tx";
+const TOWER_SAVED_Y: &str = "ty";
+const TOWER_SAVED_Z: &str = "tz";
 
 /// A block position.
 pub(crate) type Pos = [i32; 3];
@@ -708,6 +715,12 @@ fn spools_back(wires: &[SavedWire]) -> [(Wire, u32); 3] {
 }
 
 /// The empty spool takes every wire out of the clicked connector, on both ends.
+///
+/// A wire is removed only where **both** ends are loaded and record each other: the peer's
+/// reciprocal edit is committed and re-read first, then this connector's, and a spool is handed
+/// back only for a wire confirmed gone from both sides. A peer that is unloaded, or whose saved
+/// data does not update, keeps its edge and yields no refund — so the same wire cannot be
+/// refunded twice and no one-sided edge is left behind for the network walk to treat as live.
 fn remove_wires(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, pos: Pos) {
   let Some(saved) = saved_at(host, level, keys, pos) else {
     return;
@@ -720,29 +733,78 @@ fn remove_wires(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, pos: Pos
     feedback(host, "This connector has no wire.");
     return;
   }
+  let mut removed: Vec<SavedWire> = Vec::new();
   for wire in &wires {
     let Some(other) = saved_at(host, level, keys, wire.pos) else {
       continue;
     };
+    if reciprocal_wires(&wires, pos, &saved_wires(&other.nbt), wire.pos)
+      .iter()
+      .all(|known| known.pos != wire.pos)
+    {
+      continue;
+    }
     let kept: Vec<SavedWire> = saved_wires(&other.nbt)
       .into_iter()
       .filter(|saved| saved.pos != pos)
       .collect();
     let mut data = Compound::new();
     store_wires(&mut data, &kept);
-    if let Some(entity) = host.block_entity(level, wire.pos) {
-      let _ = entity.merge_data(host, data);
+    let stored = host
+      .block_entity(level, wire.pos)
+      .is_some_and(|entity| entity.merge_data(host, data).is_ok());
+    if !stored {
+      continue;
     }
+    // Re-read the peer: only a saved list that no longer names this connector counts.
+    let still_there = saved_at(host, level, keys, wire.pos)
+      .is_some_and(|after| saved_wires(&after.nbt).iter().any(|saved| saved.pos == pos));
+    if still_there {
+      continue;
+    }
+    removed.push(wire.clone());
   }
+  if removed.is_empty() {
+    feedback(
+      host,
+      "No wire was removed: its other end is not loaded or did not answer.",
+    );
+    return;
+  }
+  let kept: Vec<SavedWire> = wires
+    .iter()
+    .filter(|wire| !removed.iter().any(|gone| gone.pos == wire.pos))
+    .cloned()
+    .collect();
   let mut data = Compound::new();
-  store_wires(&mut data, &[]);
-  if let Some(entity) = host.block_entity(level, pos) {
-    let _ = entity.merge_data(host, data);
+  store_wires(&mut data, &kept);
+  let stored = host
+    .block_entity(level, pos)
+    .is_some_and(|entity| entity.merge_data(host, data).is_ok());
+  // Refund together with the commit: only wires this connector's own saved list no longer
+  // names, after a successful write, may hand a spool back.
+  let confirmed: Vec<SavedWire> = if stored {
+    saved_at(host, level, keys, pos)
+      .map(|after| {
+        let now = saved_wires(&after.nbt);
+        removed
+          .iter()
+          .filter(|gone| !now.iter().any(|wire| wire.pos == gone.pos))
+          .cloned()
+          .collect()
+      })
+      .unwrap_or_default()
+  } else {
+    Vec::new()
+  };
+  if confirmed.is_empty() {
+    feedback(host, "The wire was not removed.");
+    return;
   }
   if let Some(player) = host.players().acting_player()
     && player.is_creative(host) != Some(true)
   {
-    for (wire, count) in spools_back(&wires) {
+    for (wire, count) in spools_back(&confirmed) {
       let key = match wire {
         Wire::Copper => keys.copper,
         Wire::Gold => keys.gold,
@@ -754,6 +816,22 @@ fn remove_wires(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, pos: Pos
     }
   }
   feedback(host, "Wire removed.");
+}
+
+/// The wires of `own` at `own_pos` that point at `peer` and that the peer records back: the
+/// only ones a reciprocal removal may touch.
+fn reciprocal_wires(
+  own: &[SavedWire],
+  own_pos: Pos,
+  peer: &[SavedWire],
+  peer_pos: Pos,
+) -> Vec<SavedWire> {
+  own
+    .iter()
+    .filter(|wire| wire.pos == peer_pos)
+    .filter(|_| peer.iter().any(|known| known.pos == own_pos))
+    .cloned()
+    .collect()
 }
 
 // --- the level pass -------------------------------------------------------
@@ -779,9 +857,19 @@ pub(crate) fn level_ticked(host: &mut dyn ServerHost, level: LevelRef, queued: &
       settle(host, level, keys, *pos);
     }
   }
+  // Form the accumulators into towers before anything reads them: the pass's own reads, the
+  // blocks' output sides and the energy capability all answer for the tower.
+  let accumulators: BTreeSet<Pos> = blocks
+    .iter()
+    .filter(|(_, saved)| saved.kind == Kind::Accumulator)
+    .map(|(pos, _)| *pos)
+    .collect();
+  let towers = plan_towers(&accumulators);
+  reconcile_towers(host, level, &blocks, &towers);
   for (pos, saved) in &blocks {
     if saved.kind == Kind::Accumulator {
-      accumulator_output(host, level, *pos);
+      let tower = towers.get(pos).copied().unwrap_or(Tower::single(*pos));
+      accumulator_output(host, level, *pos, tower.role(*pos));
     }
   }
   let nodes: Vec<Node> = blocks
@@ -847,10 +935,22 @@ fn mounted_mode(ours: Option<Kind>, foreign: bool, side: Direction) -> Mode {
 }
 
 /// An accumulator feeds the blocks on its UP and DOWN faces
-/// (`ModularAccumulatorBlockEntity.tickOutput`); a single block has both of its `top`/`bottom`
-/// state bits set, which this slice always keeps.
-fn accumulator_output(host: &mut dyn ServerHost, level: LevelRef, pos: Pos) {
-  for side in [Direction::Up, Direction::Down] {
+/// (`ModularAccumulatorBlockEntity.tickOutput`). Only the tower's highest block has its `top`
+/// bit and only its lowest the `bottom` one, so a tower feeds only what stands above and below
+/// it and never itself.
+fn accumulator_output(
+  host: &mut dyn ServerHost,
+  level: LevelRef,
+  pos: Pos,
+  (top, bottom): (bool, bool),
+) {
+  let sides: &[Direction] = match (top, bottom) {
+    (true, true) => &[Direction::Up, Direction::Down],
+    (true, false) => &[Direction::Up],
+    (false, true) => &[Direction::Down],
+    (false, false) => &[],
+  };
+  for &side in sides {
     let at = offset(pos, side);
     let Some(source) = level.capability(host, &ENERGY, pos, Some(side)) else {
       continue;
@@ -861,6 +961,372 @@ fn accumulator_output(host: &mut dyn ServerHost, level: LevelRef, pos: Pos) {
     let max = u32::try_from(ACCUMULATOR_TRANSFER).unwrap_or(0);
     let _ = host.transaction(|host, tx| move_energy(host, &source, &sink, max, tx));
   }
+}
+
+/// Write the plan into the accumulators of this pass: each block's saved tower, and the `top`
+/// / `bottom` state bits its role gives it (upstream's `notifyMultiUpdated`). Only a change is
+/// written, so a settled tower costs two property reads a block a tick.
+fn reconcile_towers(
+  host: &mut dyn ServerHost,
+  level: LevelRef,
+  blocks: &[(Pos, Saved)],
+  towers: &BTreeMap<Pos, Tower>,
+) {
+  for (pos, saved) in blocks {
+    if saved.kind != Kind::Accumulator {
+      continue;
+    }
+    let Some(tower) = towers.get(pos).copied() else {
+      continue;
+    };
+    if !tower_is_saved(&saved.nbt, tower) {
+      let mut data = Compound::new();
+      save_tower(&mut data, tower);
+      if let Some(entity) = host.block_entity(level, *pos) {
+        let _ = entity.merge_data(host, data);
+      }
+    }
+    let (top, bottom) = tower.role(*pos);
+    for (key, wanted) in [("top", top), ("bottom", bottom)] {
+      let value = if wanted { "true" } else { "false" };
+      if level.block_property(host, *pos, key).as_deref() != Some(value) {
+        let _ = host.set_block_property(*pos, key, value);
+      }
+    }
+  }
+}
+
+/// The accumulator's energy as the game asks for it: the whole tower behind every one of its
+/// blocks, as upstream's `handlerForCapability` gives each part the controller's storage.
+///
+/// The declared one-block buffer (`Kind::buffer`) is what the game answers with; this provider
+/// is registered ahead of it, so a formed tower's pooled charge and its `blocks * 2,000,000`
+/// capacity are what a neighbour sees, and one connector on any part drains the tower.
+struct AccumulatorEnergy {
+  level: LevelRef,
+  pos: Pos,
+}
+
+impl AccumulatorEnergy {
+  /// The tower this block belongs to, or its own single before the pass formed it.
+  fn tower(&self, host: &dyn Host) -> Tower {
+    host
+      .block_entity(self.level, self.pos)
+      .and_then(|entity| entity.data(host))
+      .map_or_else(
+        || Tower::single(self.pos),
+        |nbt| tower_saved(&nbt, self.pos),
+      )
+  }
+
+  /// Writes the charges of `before`/`after` back for the blocks that changed.
+  fn write_charges(&self, host: &mut dyn ServerHost, changed: &[(Pos, i32)]) {
+    for &(pos, charge) in changed {
+      let mut data = Compound::new();
+      put_int(&mut data, CHARGE, charge);
+      if let Some(entity) = host.block_entity(self.level, pos) {
+        let _ = entity.merge_data(host, data);
+      }
+    }
+  }
+}
+
+impl mod_api::EnergyHandler for AccumulatorEnergy {
+  fn amount(&self, host: &mut dyn ServerHost) -> u32 {
+    let tower = self.tower(host);
+    u32::try_from(tower_amount(host, self.level, tower).max(0)).unwrap_or(0)
+  }
+
+  fn capacity(&self, host: &mut dyn ServerHost) -> u32 {
+    u32::try_from(self.tower(host).capacity()).unwrap_or(u32::MAX)
+  }
+
+  /// One call moves at most 5,000 FE, as the accumulator's declared buffer does
+  /// (`accumulator_max_input`).
+  fn insert(&self, host: &mut dyn ServerHost, _tx: &mod_api::Transaction, amount: u32) -> u32 {
+    let want = i32::try_from(amount.min(TRANSFER_CAP)).unwrap_or(ACCUMULATOR_TRANSFER);
+    let tower = self.tower(host);
+    let mut charges = tower_charges(host, self.level, tower);
+    let before = charges.clone();
+    let added = store_tower(&mut charges, want);
+    let changed: Vec<(Pos, i32)> = charges
+      .iter()
+      .zip(&before)
+      .filter(|((_, after), (_, before))| after != before)
+      .map(|((pos, after), _)| (*pos, *after))
+      .collect();
+    self.write_charges(host, &changed);
+    u32::try_from(added).unwrap_or(0)
+  }
+
+  /// The same 5,000 FE a call a drain moves; a drain takes the tower's highest blocks first.
+  fn extract(&self, host: &mut dyn ServerHost, _tx: &mod_api::Transaction, amount: u32) -> u32 {
+    let want = i32::try_from(amount.min(TRANSFER_CAP)).unwrap_or(ACCUMULATOR_TRANSFER);
+    let tower = self.tower(host);
+    let mut charges = tower_charges(host, self.level, tower);
+    let before = charges.clone();
+    let taken = drain_tower(&mut charges, want);
+    let changed: Vec<(Pos, i32)> = charges
+      .iter()
+      .zip(&before)
+      .filter(|((_, after), (_, before))| after != before)
+      .map(|((pos, after), _)| (*pos, *after))
+      .collect();
+    self.write_charges(host, &changed);
+    u32::try_from(taken).unwrap_or(0)
+  }
+}
+
+/// The most one capability call moves, as the accumulator's declared buffer allows.
+const TRANSFER_CAP: u32 = ACCUMULATOR_TRANSFER as u32;
+
+/// The accumulator's capability handler at one position, for `Registrar::block_capability_before_game`.
+pub(crate) fn accumulator_energy(level: LevelRef, pos: Pos) -> Box<dyn mod_api::EnergyHandler> {
+  Box::new(AccumulatorEnergy { level, pos })
+}
+
+// --- the modular accumulator tower ----------------------------------------
+
+/// How many blocks wide an accumulator tower may be, each way
+/// (`accumulator_max_width`, 3 by default).
+const TOWER_WIDTH: i32 = 3;
+/// How many blocks high an accumulator tower may be (`accumulator_max_height`, 5 by default).
+const TOWER_HEIGHT: i32 = 5;
+
+/// A formed accumulator tower: a square footprint `width` × `width` and `height` blocks high,
+/// anchored at its lowest corner. Upstream's `CAConnectivityHandler` forms the same shape into
+/// one controller, whose `getTotalAccumulatorSize()` is `width * width * height`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Tower {
+  /// The lowest corner: upstream's controller, and the anchor of the box.
+  controller: Pos,
+  /// The footprint's width, in blocks, both ways.
+  width: i32,
+  /// How many blocks high the tower is.
+  height: i32,
+}
+
+impl Tower {
+  /// One block on its own: what an accumulator is before (and when it never becomes) a tower.
+  fn single(pos: Pos) -> Self {
+    Self {
+      controller: pos,
+      width: 1,
+      height: 1,
+    }
+  }
+
+  /// How many blocks the tower is made of.
+  fn blocks(self) -> i32 {
+    self.width * self.width * self.height
+  }
+
+  /// The tower's whole capacity: 2,000,000 FE a block.
+  fn capacity(self) -> i32 {
+    self.blocks() * ACCUMULATOR_CAPACITY
+  }
+
+  /// The y of the tower's highest layer.
+  fn top(self) -> i32 {
+    self.controller[1] + self.height - 1
+  }
+
+  /// Whether `pos` is one of the tower's blocks.
+  fn contains(self, pos: Pos) -> bool {
+    pos[0] >= self.controller[0]
+      && pos[0] < self.controller[0] + self.width
+      && pos[2] >= self.controller[2]
+      && pos[2] < self.controller[2] + self.width
+      && pos[1] >= self.controller[1]
+      && pos[1] <= self.top()
+  }
+
+  /// The tower's blocks, lowest layer first, the controller's own column before the others: the
+  /// order energy fills in.
+  fn members(self) -> Vec<Pos> {
+    let mut members = Vec::with_capacity(usize::try_from(self.blocks()).unwrap_or(0));
+    for y in 0..self.height {
+      for z in 0..self.width {
+        for x in 0..self.width {
+          members.push([
+            self.controller[0] + x,
+            self.controller[1] + y,
+            self.controller[2] + z,
+          ]);
+        }
+      }
+    }
+    members
+  }
+
+  /// The `(top, bottom)` state bits of `pos`, as upstream's `notifyMultiUpdated` sets them: only
+  /// the highest layer outputs to the block above, and only the lowest layer to the block below.
+  fn role(self, pos: Pos) -> (bool, bool) {
+    (pos[1] == self.top(), pos[1] == self.controller[1])
+  }
+}
+
+/// The largest tower anchored at `anchor` whose blocks are all in `available`: upstream's
+/// `tryToFormNewMulti`, which tries every width up to 3 and keeps the biggest box, a wider one
+/// on a tie.
+fn largest_tower(available: &BTreeSet<Pos>, anchor: Pos) -> Tower {
+  let mut best = Tower::single(anchor);
+  for width in 1..=TOWER_WIDTH {
+    let mut height = 0;
+    'layers: for step in 0..TOWER_HEIGHT {
+      for x in 0..width {
+        for z in 0..width {
+          let at = [anchor[0] + x, anchor[1] + step, anchor[2] + z];
+          if !available.contains(&at) {
+            break 'layers;
+          }
+        }
+      }
+      height += 1;
+    }
+    let candidate = Tower {
+      controller: anchor,
+      width,
+      height,
+    };
+    if height > 0 && candidate.blocks() >= best.blocks() {
+      best = candidate;
+    }
+  }
+  best
+}
+
+/// Every accumulator of `positions` and the tower it belongs to, each tower anchored at the
+/// lowest free corner and filled greedily (upstream's own `formMulti` order).
+fn plan_towers(positions: &BTreeSet<Pos>) -> BTreeMap<Pos, Tower> {
+  let mut left = positions.clone();
+  let mut planned = BTreeMap::new();
+  while let Some(anchor) = left
+    .iter()
+    .min_by_key(|pos| (pos[1], pos[0], pos[2]))
+    .copied()
+  {
+    let tower = largest_tower(&left, anchor);
+    for member in tower.members() {
+      left.remove(&member);
+      planned.insert(member, tower);
+    }
+  }
+  planned
+}
+
+/// The tower a saved compound names, or the block's own single when it names none yet.
+fn tower_saved(nbt: &Compound, pos: Pos) -> Tower {
+  let width = int_at(nbt, TOWER_SAVED_WIDTH);
+  let height = int_at(nbt, TOWER_SAVED_HEIGHT);
+  let controller = [
+    int_at(nbt, TOWER_SAVED_X),
+    int_at(nbt, TOWER_SAVED_Y),
+    int_at(nbt, TOWER_SAVED_Z),
+  ];
+  let tower = Tower {
+    controller,
+    width,
+    height,
+  };
+  if width >= 1 && height >= 1 && tower.contains(pos) {
+    tower
+  } else {
+    Tower::single(pos)
+  }
+}
+
+/// Whether `nbt` already carries `tower`, so the pass writes only when it changed.
+fn tower_is_saved(nbt: &Compound, tower: Tower) -> bool {
+  let mut wanted = Compound::new();
+  save_tower(&mut wanted, tower);
+  [
+    TOWER_SAVED_WIDTH,
+    TOWER_SAVED_HEIGHT,
+    TOWER_SAVED_X,
+    TOWER_SAVED_Y,
+    TOWER_SAVED_Z,
+  ]
+  .iter()
+  .all(|key| wanted.get(&(*key).into()) == nbt.get(&(*key).into()))
+}
+
+/// Save `tower` into a compound: its shape and the controller's position.
+fn save_tower(nbt: &mut Compound, tower: Tower) {
+  put_int(nbt, TOWER_SAVED_WIDTH, tower.width);
+  put_int(nbt, TOWER_SAVED_HEIGHT, tower.height);
+  put_int(nbt, TOWER_SAVED_X, tower.controller[0]);
+  put_int(nbt, TOWER_SAVED_Y, tower.controller[1]);
+  put_int(nbt, TOWER_SAVED_Z, tower.controller[2]);
+}
+
+/// The charges of a tower's blocks that still stand, in fill order: the first `count` entries of
+/// `tower.members()` that are still accumulators.
+fn tower_charges(host: &dyn Host, level: LevelRef, tower: Tower) -> Vec<(Pos, i32)> {
+  tower
+    .members()
+    .into_iter()
+    .filter(|&pos| is_accumulator(host, level, pos))
+    .map(|pos| {
+      let charge = host
+        .block_entity(level, pos)
+        .and_then(|entity| entity.data(host))
+        .map_or(0, |nbt| int_at(&nbt, CHARGE).clamp(0, ACCUMULATOR_CAPACITY));
+      (pos, charge)
+    })
+    .collect()
+}
+
+/// What a tower holds: the sum of its blocks' charges.
+fn tower_amount(host: &dyn Host, level: LevelRef, tower: Tower) -> i32 {
+  tower_charges(host, level, tower)
+    .into_iter()
+    .map(|(_, charge)| charge)
+    .sum()
+}
+
+/// Whether the block at `pos` is still one of the accumulator blocks.
+fn is_accumulator(host: &dyn Host, level: LevelRef, pos: Pos) -> bool {
+  let Some(block) = level.block(host, pos) else {
+    return false;
+  };
+  host
+    .block_key(ACCUMULATOR)
+    .is_some_and(|accumulator| accumulator == block)
+}
+
+/// Adds up to `amount` FE to a tower's blocks, lowest first, each up to its own 2,000,000: how
+/// much the tower took.
+fn store_tower(charges: &mut [(Pos, i32)], amount: i32) -> i32 {
+  let mut left = amount.max(0);
+  let mut added = 0;
+  for (_, charge) in charges.iter_mut() {
+    let space = ACCUMULATOR_CAPACITY - *charge;
+    let take = space.min(left);
+    *charge += take;
+    added += take;
+    left -= take;
+    if left == 0 {
+      break;
+    }
+  }
+  added
+}
+
+/// Takes up to `amount` FE out of a tower's blocks, highest first: how much came out.
+fn drain_tower(charges: &mut [(Pos, i32)], amount: i32) -> i32 {
+  let mut left = amount.max(0);
+  let mut taken = 0;
+  for (_, charge) in charges.iter_mut().rev() {
+    let give = (*charge).min(left);
+    *charge -= give;
+    taken += give;
+    left -= give;
+    if left == 0 {
+      break;
+    }
+  }
+  taken
 }
 
 /// The connector groups of one pass, each a list of positions in the order they were given. Two
@@ -1000,12 +1466,60 @@ fn run_network(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, members: 
 /// the reply names it, so a line from an earlier command cannot be read as this one's answer.
 pub(crate) fn command_usages() -> [&'static str; 5] {
   [
-    "createaddition info <pos:block_pos> [tag:word]",
-    "createaddition energy <pos:block_pos> <amount:integer> [tag:word]",
-    "createaddition link <pos:block_pos> <pos2:block_pos> <wire:word> [tag:word]",
-    "createaddition unlink <pos:block_pos> <pos2:block_pos> [tag:word]",
-    "createaddition mode <pos:block_pos> <mode:word> [tag:word]",
+    "createaddition info <pos:block_pos> [tag:text]",
+    "createaddition energy <pos:block_pos> <amount:integer> [tag:text]",
+    "createaddition link <pos:block_pos> <pos2:block_pos> <wire:word> [tag:text]",
+    "createaddition unlink <pos:block_pos> <pos2:block_pos> [tag:text]",
+    "createaddition mode <pos:block_pos> <mode:word> [tag:text]",
   ]
+}
+
+/// The command tree: `info` and `mode` are ordinary player controls (level 0, with the reach
+/// check below), while `energy`, `link` and `unlink` are administrative writes that stand in for
+/// an item the player would have to hold (a spool) and are operator-only (level 2).
+pub(crate) fn command_declarations() -> Vec<Command> {
+  command_usages()
+    .iter()
+    .map(|usage| {
+      let player_control =
+        usage.starts_with("createaddition info") || usage.starts_with("createaddition mode");
+      if player_control {
+        Command::new(usage)
+      } else {
+        Command::op(usage, 2)
+      }
+    })
+    .collect()
+}
+
+/// A player's interaction reach, in blocks: vanilla's ~4.5 plus a margin.
+const REACH: f64 = 6.0;
+
+/// Whether a block at `pos` is within a player at `player`: the ordinary interaction distance,
+/// measured from the block's centre to the player's feet.
+fn within_reach(player: [f64; 3], pos: Pos) -> bool {
+  let dx = player[0] - (f64::from(pos[0]) + 0.5);
+  let dy = player[1] - (f64::from(pos[1]) + 0.5);
+  let dz = player[2] - (f64::from(pos[2]) + 0.5);
+  dx * dx + dy * dy + dz * dz <= REACH * REACH
+}
+
+/// Whether the acting source may touch the block at `pos`: an operator may anywhere, a player
+/// only within reach, and the console (which has no acting player) anywhere.
+fn has_access(host: &dyn ServerHost, pos: Pos) -> bool {
+  let Some(player) = host.players().acting_player() else {
+    return true;
+  };
+  if player
+    .permission_level(host)
+    .is_some_and(|level| level >= 2)
+  {
+    return true;
+  }
+  player
+    .entity()
+    .position(host)
+    .is_some_and(|at| within_reach(at, pos))
 }
 
 /// A trailing `#tag` word, without its marker: the harness marks each command so its reply can be
@@ -1067,6 +1581,10 @@ pub(crate) fn command_info(host: &mut dyn ServerHost, command: &CommandInvocatio
     feedback(host, "Usage: /createaddition info <x> <y> <z>");
     return;
   };
+  if !has_access(host, pos) {
+    feedback(host, "That block is too far away.");
+    return;
+  }
   let Some(level) = command_level(host) else {
     feedback(host, "No level to read.");
     return;
@@ -1085,19 +1603,40 @@ pub(crate) fn command_info(host: &mut dyn ServerHost, command: &CommandInvocatio
 /// network buffer. Byte-identical to 0.1.0's readout.
 fn info_line(host: &dyn Host, level: LevelRef, pos: Pos, saved: &Saved) -> String {
   let time = level.game_time(host).unwrap_or(0);
-  let charge = int_at(&saved.nbt, CHARGE).max(0);
   let Some(connector) = saved.kind.connector() else {
+    let tower = tower_saved(&saved.nbt, pos);
+    let charge = tower_amount(host, level, tower).max(0);
+    let capacity = tower.capacity();
+    if tower.blocks() == 1 {
+      return format!(
+        "{} at {},{},{}: {}/{} FE (t={})",
+        Kind::Accumulator.label(),
+        pos[0],
+        pos[1],
+        pos[2],
+        charge,
+        capacity,
+        time
+      );
+    }
+    let [x, y, z] = tower.controller;
     return format!(
-      "{} at {},{},{}: {}/{} FE (t={})",
+      "{} at {},{},{}: {}/{} FE, tower {}x{} at {},{},{} (t={})",
       Kind::Accumulator.label(),
       pos[0],
       pos[1],
       pos[2],
       charge,
-      ACCUMULATOR_CAPACITY,
+      capacity,
+      tower.width,
+      tower.height,
+      x,
+      y,
+      z,
       time
     );
   };
+  let charge = int_at(&saved.nbt, CHARGE).max(0);
   let links = saved_wires(&saved.nbt)
     .iter()
     .map(|wire| {
@@ -1157,6 +1696,33 @@ pub(crate) fn command_energy(host: &mut dyn ServerHost, command: &CommandInvocat
     feedback(host, "No Create Crafts & Additions block there.");
     return;
   };
+  if saved.kind == Kind::Accumulator {
+    // An accumulator's charge is its whole tower's: seeding one block fills the pool, up to
+    // the tower's capacity, so a formed tower can hold more than one block's 2,000,000.
+    let tower = tower_saved(&saved.nbt, pos);
+    let after = clamped(amount, tower.capacity());
+    let mut charges = tower_charges(host, level, tower);
+    for cell in &mut charges {
+      cell.1 = 0;
+    }
+    store_tower(&mut charges, after);
+    let wrote = host.transaction(|host, _tx| {
+      for &(at, charge) in &charges {
+        let mut data = Compound::new();
+        put_int(&mut data, CHARGE, charge);
+        if let Some(entity) = host.block_entity(level, at) {
+          let _ = entity.merge_data(host, data);
+        }
+      }
+      Ok::<(), ()>(())
+    });
+    if wrote.is_err() {
+      feedback(host, "No Create Crafts & Additions block there.");
+      return;
+    }
+    feedback(host, &reply(tag, format!("Energy set to {after} FE.")));
+    return;
+  }
   let after = clamped(amount, saved.kind.capacity());
   let mut data = Compound::new();
   put_int(&mut data, CHARGE, after);
@@ -1178,6 +1744,10 @@ pub(crate) fn command_mode(host: &mut dyn ServerHost, command: &CommandInvocatio
     feedback(host, "Usage: /createaddition mode <x> <y> <z> <mode>");
     return;
   };
+  if !has_access(host, pos) {
+    feedback(host, "That block is too far away.");
+    return;
+  }
   let Some(level) = command_level(host) else {
     feedback(host, "No level to write.");
     return;
@@ -1358,12 +1928,232 @@ fn unlink_blocks(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, a: Pos,
 mod tests {
   use super::*;
 
+  fn at(positions: &[[i32; 3]]) -> BTreeSet<Pos> {
+    positions.iter().copied().collect()
+  }
+
+  fn charges(cells: &[[i32; 3]]) -> Vec<(Pos, i32)> {
+    cells.iter().map(|&pos| (pos, 0)).collect()
+  }
+
+  fn column(base: Pos, height: i32) -> Vec<[i32; 3]> {
+    (0..height)
+      .map(|dy| [base[0], base[1] + dy, base[2]])
+      .collect()
+  }
+
+  #[test]
+  fn one_accumulator_is_a_single_block_tower() {
+    let plan = plan_towers(&at(&[[0, 64, 0]]));
+    let tower = plan[&[0, 64, 0]];
+    assert_eq!(tower, Tower::single([0, 64, 0]));
+    assert_eq!(tower.blocks(), 1);
+    assert_eq!(tower.capacity(), ACCUMULATOR_CAPACITY);
+    assert_eq!(tower.role([0, 64, 0]), (true, true));
+  }
+
+  #[test]
+  fn a_column_of_three_is_one_tower_of_six_million_fe() {
+    let blocks = column([3, 64, 7], 3);
+    let plan = plan_towers(&at(&blocks));
+    let tower = plan[&[3, 64, 7]];
+    assert_eq!(tower.controller, [3, 64, 7]);
+    assert_eq!((tower.width, tower.height), (1, 3));
+    assert_eq!(tower.blocks(), 3);
+    assert_eq!(tower.capacity(), 3 * ACCUMULATOR_CAPACITY);
+    for block in &blocks {
+      assert_eq!(
+        plan[block], tower,
+        "every block of the column is the same tower"
+      );
+    }
+    assert_eq!(tower.role([3, 64, 7]), (false, true));
+    assert_eq!(tower.role([3, 65, 7]), (false, false));
+    assert_eq!(tower.role([3, 66, 7]), (true, false));
+  }
+
+  #[test]
+  fn a_three_by_three_plate_is_one_tower_of_eighteen_million_fe() {
+    let mut blocks = Vec::new();
+    for x in 0..3 {
+      for z in 0..3 {
+        blocks.push([10 + x, 64, -2 + z]);
+      }
+    }
+    let plan = plan_towers(&at(&blocks));
+    let tower = plan[&[10, 64, -2]];
+    assert_eq!((tower.width, tower.height), (3, 1));
+    assert_eq!(tower.blocks(), 9);
+    assert_eq!(tower.capacity(), 9 * ACCUMULATOR_CAPACITY);
+  }
+
+  #[test]
+  fn a_flat_row_is_not_a_tower() {
+    // The footprint is square: three blocks in a line are three towers of one, as upstream's
+    // `tryToFormNewMultiOfWidth` finds no 2x2 or 3x3 layer.
+    let plan = plan_towers(&at(&[[0, 64, 0], [1, 64, 0], [2, 64, 0]]));
+    assert_eq!(plan.len(), 3);
+    for (_, tower) in plan {
+      assert_eq!(tower.blocks(), 1);
+      assert_eq!(tower.capacity(), ACCUMULATOR_CAPACITY);
+    }
+  }
+
+  #[test]
+  fn a_column_of_six_is_a_five_high_tower_and_a_single() {
+    let plan = plan_towers(&at(&column([0, 64, 0], 6)));
+    let tower = plan[&[0, 64, 0]];
+    assert_eq!((tower.width, tower.height), (1, 5));
+    assert_eq!(tower.capacity(), 5 * ACCUMULATOR_CAPACITY);
+    let above = plan[&[0, 69, 0]];
+    assert_eq!(above, Tower::single([0, 69, 0]));
+    assert_eq!(above.capacity(), ACCUMULATOR_CAPACITY);
+    assert_eq!(tower.role([0, 68, 0]), (true, false));
+  }
+
+  #[test]
+  fn a_cube_and_a_stray_block_form_the_largest_box_and_a_single() {
+    let mut blocks = Vec::new();
+    for x in 0..2 {
+      for y in 0..2 {
+        for z in 0..2 {
+          blocks.push([x, 64 + y, z]);
+        }
+      }
+    }
+    blocks.push([2, 64, 0]);
+    let plan = plan_towers(&at(&blocks));
+    let cube = plan[&[0, 64, 0]];
+    assert_eq!((cube.width, cube.height), (2, 2));
+    assert_eq!(cube.capacity(), 8 * ACCUMULATOR_CAPACITY);
+    assert_eq!(plan[&[2, 64, 0]], Tower::single([2, 64, 0]));
+  }
+
+  #[test]
+  fn storing_fills_the_lowest_block_first_and_draining_takes_the_highest_first() {
+    let tower = Tower {
+      controller: [0, 64, 0],
+      width: 1,
+      height: 3,
+    };
+    let mut cells = charges(&tower.members());
+    assert_eq!(store_tower(&mut cells, 5_000_000), 5_000_000);
+    assert_eq!(
+      cells.iter().map(|(_, charge)| *charge).collect::<Vec<_>>(),
+      vec![ACCUMULATOR_CAPACITY, ACCUMULATOR_CAPACITY, 1_000_000]
+    );
+    // The tower is full at three blocks: a fourth block's worth is refused, not lost.
+    assert_eq!(store_tower(&mut cells, 7_000_000), 1_000_000);
+    assert_eq!(
+      cells.iter().map(|(pos, _)| *pos).collect::<Vec<_>>(),
+      tower.members()
+    );
+    // Draining starts at the top, so the bottom block alone never has to hold the whole amount:
+    // the 6,000,000 the tower holds leave the top two blocks, and the bottom keeps its 2,000,000.
+    assert_eq!(drain_tower(&mut cells, 4_000_000), 4_000_000);
+    assert_eq!(
+      cells.iter().map(|(_, charge)| *charge).collect::<Vec<_>>(),
+      vec![ACCUMULATOR_CAPACITY, 0, 0]
+    );
+  }
+
+  #[test]
+  fn a_tower_never_gives_more_than_its_blocks_hold() {
+    let tower = Tower {
+      controller: [0, 64, 0],
+      width: 1,
+      height: 3,
+    };
+    let mut cells = charges(&tower.members());
+    cells[1].1 = 1_000_000;
+    assert_eq!(drain_tower(&mut cells, 9_000_000), 1_000_000);
+    assert_eq!(cells.iter().map(|(_, charge)| *charge).sum::<i32>(), 0);
+  }
+
+  #[test]
+  fn a_saved_tower_is_read_back_and_a_stale_one_falls_back_to_a_single() {
+    let tower = Tower {
+      controller: [4, 64, -1],
+      width: 2,
+      height: 2,
+    };
+    let mut nbt = Compound::new();
+    save_tower(&mut nbt, tower);
+    assert!(tower_is_saved(&nbt, tower));
+    for member in tower.members() {
+      assert_eq!(tower_saved(&nbt, member), tower);
+    }
+    // A compound whose saved box does not contain the block (a tower that moved under it)
+    // is read as the block's own single, never as a box it is not in.
+    assert_eq!(tower_saved(&nbt, [9, 64, 9]), Tower::single([9, 64, 9]));
+    let mut elsewhere = Compound::new();
+    save_tower(
+      &mut elsewhere,
+      Tower {
+        controller: [4, 64, -1],
+        width: 1,
+        height: 3,
+      },
+    );
+    assert!(!tower_is_saved(&elsewhere, tower));
+  }
+
   fn wire(pos: Pos) -> SavedWire {
     SavedWire {
       pos,
       node: 0,
       wire: Wire::Copper,
     }
+  }
+
+  #[test]
+  fn a_wire_is_removed_only_where_the_peer_records_it() {
+    let here = [0, 64, 0];
+    let there = [1, 64, 0];
+    let elsewhere = [2, 64, 0];
+    let mine = vec![wire(there), wire(elsewhere)];
+    // The peer records this connector: its edge is reciprocal and may go.
+    assert_eq!(
+      reciprocal_wires(&mine, here, &[wire(here)], there)
+        .iter()
+        .map(|known| known.pos)
+        .collect::<Vec<_>>(),
+      vec![there]
+    );
+    // The peer does not name this connector: no removal, so no second refund.
+    assert!(reciprocal_wires(&mine, here, &[wire(elsewhere)], there).is_empty());
+    assert!(reciprocal_wires(&mine, here, &[], there).is_empty());
+  }
+
+  #[test]
+  fn the_mutating_commands_are_operator_only_and_the_controls_are_not() {
+    let declared = command_declarations();
+    let level_of = |root: &str| {
+      declared
+        .iter()
+        .find(|command| command.usage.starts_with(root))
+        .unwrap_or_else(|| panic!("{root} is declared"))
+        .level
+    };
+    assert_eq!(level_of("createaddition energy"), 2);
+    assert_eq!(level_of("createaddition link"), 2);
+    assert_eq!(level_of("createaddition unlink"), 2);
+    assert_eq!(level_of("createaddition mode"), 0, "a player control");
+    assert_eq!(level_of("createaddition info"), 0, "a player readout");
+  }
+
+  #[test]
+  fn a_block_beyond_reach_is_not_a_player_control() {
+    let pos = [0, 64, 0];
+    assert!(
+      within_reach([0.5, 64.0, 4.5], pos),
+      "four blocks away is in reach"
+    );
+    assert!(
+      !within_reach([0.5, 64.0, 7.5], pos),
+      "seven blocks away is not"
+    );
+    assert!(!within_reach([0.5, 74.0, 0.5], pos), "ten blocks up is not");
   }
 
   #[test]

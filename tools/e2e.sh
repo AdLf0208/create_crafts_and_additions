@@ -131,6 +131,25 @@ launch() { # launch BINARY [WORLD] [extra args]
 
 block_name() { ctl block "$1" "$2" "$3" | jq -r '.name // .block // empty'; }
 
+# The block state's own string, e.g. `createaddition:modular_accumulator[bottom=false,top=true]`.
+block_state() { ctl block "$1" "$2" "$3" | jq -r '.state // empty'; }
+
+# The `top` / `bottom` multiblock bits of an accumulator, asserted on the state string the game
+# reports (not on the mod's own readout).
+expect_bits() { # expect_bits X Y TOP BOTTOM
+    local state
+    state=$(block_state "$1" "$2" 0)
+    case "$state" in
+        *"top=$3"*) ;;
+        *) fail "the accumulator at $1,$2 reports '$state', expected top=$3" ;;
+    esac
+    case "$state" in
+        *"bottom=$4"*) ;;
+        *) fail "the accumulator at $1,$2 reports '$state', expected bottom=$4" ;;
+    esac
+    echo "  $state" >&2
+}
+
 # The End's void at X0: a stone floor and clear air above it.
 arena() {
     ctl command "execute in minecraft:the_end run tp @s $X0.5 104 0.5" >/dev/null
@@ -280,6 +299,73 @@ control_leg() {
     echo "  the control's setblock left $(block_name "$CX1" 100 0) (the arena floor)" >&2
     ctl quit >/dev/null 2>&1 || true
 }
+
+# How many of item `$1` the player holds, hotbar and main inventory.
+item_held() {
+    ctl inventory | jq --arg item "$1" '[.hotbar[], .main[] | select(.item == $item) | .count] | add // 0'
+}
+
+# The block the player stands in, as three integers.
+player_block() {
+    ctl state | jq -r '.player.position | [(.[0] | floor), (.[1] | floor), (.[2] | floor)] | @tsv'
+}
+
+# One of the mod's blocks, placed beside the player, mined for real with an iron pickaxe, and its
+# drop counted in the inventory. The drop is the block's own loot table (26.3's `"condition":
+# {"type": ...}` shape, no `bonus_rolls`): in 1.21.1's `"conditions": [ ... ]` shape the block
+# drops nothing, which is how `modularrouters` caught its router dropping 0 of itself.
+break_drop_leg() { # break_drop_leg BLOCK -> sets DROPPED
+    local block=$1 before after px py pz at
+    # A creative break drops nothing, and a block that needs a correct tool drops nothing to a
+    # hand: mine it in survival, holding the pickaxe its template's tag asks for.
+    ctl command "item replace entity @s hotbar.0 with minecraft:iron_pickaxe 1" >/dev/null
+    ctl select 1 >/dev/null
+    ctl command "gamemode survival" >/dev/null
+    ctl wait 2 >/dev/null
+    read -r px py pz <<<"$(player_block)"
+    at=$((px + 1))
+    ctl command "execute at @s run setblock ~1 ~ ~ $block" >/dev/null
+    ctl wait 4 >/dev/null
+    [ "$(block_name "$at" "$py" "$pz")" = "$block" ] \
+        || fail "the drop-test $block did not place at $at,$py,$pz"
+    before=$(item_held "$block")
+    ctl break "$at" "$py" "$pz" >/dev/null
+    ctl wait 30 >/dev/null
+    [ "$(block_name "$at" "$py" "$pz")" = "minecraft:air" ] \
+        || fail "the $block at $at,$py,$pz did not break (state $(block_name "$at" "$py" "$pz"))"
+    after=$(item_held "$block")
+    DROPPED=$((after - before))
+    echo "  $block: broke and dropped $DROPPED (held $before -> $after)" >&2
+}
+
+# LOOT_ONLY=1: the loot-table leg alone, on a launcher-built game. Used to run the same
+# assertion against a package that still carries the 1.21.1 loot tables: that run must fail,
+# and its EXIT:1 is the pre-fix red leg for the conversion.
+if [ "${LOOT_ONLY:-0}" = 1 ]; then
+    launch "$GAME" "$WORLD"
+    arena
+    for LOOT_BLOCK in createaddition:connector createaddition:large_connector createaddition:modular_accumulator; do
+        break_drop_leg "$LOOT_BLOCK"
+        [ "$DROPPED" = 1 ] \
+            || fail "mining $LOOT_BLOCK dropped $DROPPED of itself, expected the one its 26.3 loot table names"
+        ctl command "execute at @s run setblock ~2 ~ ~ minecraft:air" >/dev/null
+    done
+    echo "PASS: every block drops one of itself (LOOT_ONLY)"
+    exit 0
+fi
+
+# CONTROL_ONLY=1: the package's first assertion — its item exists — against GAME, with no arena.
+# Run it with GAME=<a game without the package> to prove the ids come from this package: that
+# run must FAIL, and its EXIT:1 is the counterfactual the evidence keeps.
+if [ "${CONTROL_ONLY:-0}" = 1 ]; then
+    launch "$GAME" "$CONTROL_WORLD"
+    ctl give createaddition:modular_accumulator 1 >/dev/null 2>&1 || true
+    ctl wait 4 >/dev/null
+    ctl inventory | jq -e '[.hotbar[], .main[] | select(.item == "createaddition:modular_accumulator")] | length >= 1' >/dev/null \
+        || fail "the game has no createaddition:modular_accumulator item, so the ids come from this package"
+    echo "PASS: the game carries createaddition:modular_accumulator (CONTROL_ONLY, no arena)"
+    exit 0
+fi
 
 echo "== launch (The End arena, launcher-built game) =="
 if [ "$CONTROL" = 1 ]; then control_leg; fi
@@ -432,4 +518,143 @@ WINDOW=$energy
     || fail "the accumulator and the block above total $((FE + WINDOW)) FE, not the 10000 seeded"
 echo "  accumulator 10000->$FE, the connector above 0->$WINDOW, total conserved at $((FE + WINDOW))"
 
-echo "PASS: FE crossed the wire at 1,000/t and was conserved, an unlinked connector moved nothing, the 16-block limit held, copper was refused between two large connectors, and an accumulator fed the block above it"
+tower_info() { # tower_info X Y
+    info "$1" "$2" 0
+    [ "$kind" = accumulator ] || fail "the accumulator at $1,$2 reads as $kind"
+}
+
+echo "== G: three stacked accumulators form one tower of 6,000,000 FE =="
+# Upstream's multiblock (`CAConnectivityHandler`): a contiguous box up to 3x3 wide and 5 high is
+# one controller, capacity 2,000,000 FE a block. The pool is what every part answers with, so a
+# seed larger than one block's 2,000,000 FE is only possible once the tower has formed.
+TOWER=$((X0 + 20))
+SINK=$((TOWER + 6))
+TC1=$((TOWER - 1))
+TC2=$((SINK - 1))
+place_accumulator "$TOWER" 100
+place_accumulator "$TOWER" 101
+place_accumulator "$TOWER" 102
+ctl wait 8
+# The visible shape: the jar's own `top`/`bottom` bits, read from the game's block state.
+expect_bits "$TOWER" 100 false true
+expect_bits "$TOWER" 101 false false
+expect_bits "$TOWER" 102 true false
+tower_info "$TOWER" 100
+[ "$capacity" = 6000000 ] || fail "a three-high tower's capacity is $capacity, expected 6000000"
+[ "$energy" = 0 ] || fail "a fresh tower holds $energy FE"
+[ "$tower_w" = 1 ] && [ "$tower_h" = 3 ] \
+    || fail "the tower reads ${tower_w}x${tower_h}, expected 1x3"
+[ "$tower_x" = "$TOWER" ] && [ "$tower_y" = 100 ] \
+    || fail "the tower's controller reads $tower_x,$tower_y, expected $TOWER,100"
+echo "  tower 1x3 at $TOWER,100: $energy/$capacity FE, bits bottom/middle/top as the jar sets them" >&2
+
+echo "== G2: one pool — 5,000,000 FE into the top block is read from every part =="
+seed_at "$TOWER" 102 5000000
+tower_info "$TOWER" 102
+[ "$energy" = 5000000 ] || fail "the top block reports $energy FE of the 5000000 seeded, not the tower's pool"
+tower_info "$TOWER" 100
+[ "$energy" = 5000000 ] || fail "the bottom block reports $energy FE, not the 5000000 seed"
+[ "$capacity" = 6000000 ] || fail "the bottom block reports a capacity of $capacity"
+echo "  the top and the bottom both report 5000000/6000000: one pool behind every block" >&2
+
+echo "== G3: breaking the top re-forms the tower at four million =="
+# The seed filled the tower bottom-first: 2,000,000 in each of the lower two blocks and the
+# remaining 1,000,000 in the top one, so removing the top leaves exactly what the two kept.
+ctl command "execute in minecraft:the_end run setblock $TOWER 102 0 minecraft:air" >/dev/null
+ctl wait 8
+expect_bits "$TOWER" 100 false true
+expect_bits "$TOWER" 101 true false
+tower_info "$TOWER" 101
+[ "$capacity" = 4000000 ] || fail "the two-high tower's capacity is $capacity, expected 4000000"
+[ "$energy" = 4000000 ] || fail "the two-high tower holds $energy FE, expected the 4000000 its blocks kept"
+echo "  two-high tower: $energy/$capacity FE, one block's 1,000,000 left with the broken block" >&2
+
+echo "== G4: a formed tower serves a wire from its pooled charge =="
+place_accumulator "$SINK" 100
+# Seed before the wire exists, so no connector is draining the tower while the command runs.
+seed_at "$TOWER" 101 4000000
+tower_info "$TOWER" 100
+[ "$energy" = 4000000 ] || fail "the tower reports $energy FE after seeding 4000000"
+place_connector "$TC1" east createaddition:large_connector
+place_connector "$TC2" east createaddition:large_connector
+set_mode "$TC2" push
+link "$TC1" "$TC2" gold
+[ "$LAST_REPLY" = "Nodes linked." ] || fail "the wire onto the tower was not laid: $LAST_REPLY"
+
+# The tower's charge, the sink's and the wire's pool as one total: both connectors parked in
+# `none` first, so the three reads are of one instant and nothing moves between them.
+tower_measure() { # tower_measure -> TOWER_FE SINK_FE POOL_FE TOTAL_FE
+    command_reply "createaddition mode $TC1 100 0 none" "$MODE_REPLY"
+    command_reply "createaddition mode $TC2 100 0 none" "$MODE_REPLY"
+    tower_info "$TOWER" 100
+    TOWER_FE=$energy
+    tower_info "$SINK" 100
+    SINK_FE=$energy
+    info "$TC1" 100 0
+    POOL_FE=$((pool_ready + pool_next))
+    TOTAL_FE=$((TOWER_FE + SINK_FE + POOL_FE))
+    command_reply "createaddition mode $TC1 100 0 pull" "$MODE_REPLY"
+    command_reply "createaddition mode $TC2 100 0 push" "$MODE_REPLY"
+}
+
+tower_measure
+BEFORE_TOWER=$TOWER_FE
+BEFORE_SINK=$SINK_FE
+BEFORE_TOTAL=$TOTAL_FE
+[ "$BEFORE_TOTAL" = 4000000 ] \
+    || fail "the tower, the sink and the wire total $BEFORE_TOTAL FE, not the 4000000 seeded"
+ctl wait "$TICKS"
+tower_measure
+MOVED=$((BEFORE_TOWER - TOWER_FE))
+GAINED=$((SINK_FE - BEFORE_SINK))
+echo "  tower $BEFORE_TOWER->$TOWER_FE, sink $BEFORE_SINK->$SINK_FE, pool $POOL_FE, total $BEFORE_TOTAL->$TOTAL_FE" >&2
+[ "$MOVED" -gt 0 ] || fail "nothing left the formed tower over $TICKS ticks"
+[ "$GAINED" -gt 0 ] || fail "the sink took nothing from the formed tower"
+[ "$GAINED" -le "$MOVED" ] \
+    || fail "the sink gained $GAINED FE while the tower lost $MOVED"
+[ "$TOTAL_FE" = "$BEFORE_TOTAL" ] \
+    || fail "FE was not conserved across the tower's wire: $BEFORE_TOTAL -> $TOTAL_FE"
+echo "  the tower's pool served the wire and FE was conserved at $TOTAL_FE" >&2
+unlink "$TC1" "$TC2"
+[ "$LAST_REPLY" = "Wire removed." ] || fail "the tower's wire was not removed: $LAST_REPLY"
+
+echo "== G5: CONTROL — three separated accumulators stay singles of 2,000,000 FE =="
+GAP=$((TOWER + 10))
+place_accumulator "$GAP" 100
+place_accumulator "$GAP" 102
+place_accumulator "$GAP" 104
+ctl wait 8
+expect_bits "$GAP" 100 true true
+expect_bits "$GAP" 102 true true
+tower_info "$GAP" 102
+[ "$capacity" = 2000000 ] \
+    || fail "a separated accumulator reports $capacity FE capacity, expected the single block's 2000000"
+seed_at "$GAP" 102 5000000
+tower_info "$GAP" 102
+SINGLE_FE=$energy
+[ "$SINGLE_FE" = 2000000 ] \
+    || fail "a separated accumulator took $SINGLE_FE FE from a 5000000 seed; a single block holds 2000000"
+tower_info "$GAP" 104
+NEIGHBOUR_FE=$energy
+[ "$NEIGHBOUR_FE" = 0 ] || fail "the block two above holds $NEIGHBOUR_FE FE, so the three are not separate"
+echo "  separate stack seeded 5000000 holds $SINGLE_FE/2000000, the block two above $NEIGHBOUR_FE" >&2
+if [ "$SELFTEST" = 1 ]; then
+    # The deliberately wrong expectation: a tower of three MUST not report four million. It
+    # does not, so this leg fails — which is the proof the tower assertions can fail.
+    [ "$capacity" = 4000000 ] || fail "SELFTEST: the tower assertion did not trip (capacity $capacity)"
+fi
+
+echo "== H: every block's loot table drops the block itself (the 26.3 dialect) =="
+# 1.21.1 writes a pool's condition as `"conditions": [ {...} ]` with the kind under
+# `"condition"`; 26.3's own tables (the prepared resources) write one `"condition":
+# {"type": ...}` per pool and have no `bonus_rolls`. Carried verbatim, the 1.21.1 shape made a
+# block drop nothing (`modularrouters` measured 0 while a vanilla table beside it dropped 1).
+for LOOT_BLOCK in createaddition:connector createaddition:large_connector createaddition:modular_accumulator; do
+    break_drop_leg "$LOOT_BLOCK"
+    [ "$DROPPED" = 1 ] \
+        || fail "mining $LOOT_BLOCK dropped $DROPPED of itself, expected the one its 26.3 loot table names"
+    ctl command "execute at @s run setblock ~2 ~ ~ minecraft:air" >/dev/null
+done
+echo "  all three blocks drop one of themselves through their 26.3 loot tables" >&2
+
+echo "PASS: FE crossed the wire at 1,000/t and was conserved, an unlinked connector moved nothing, the 16-block limit held, copper was refused between two large connectors, an accumulator fed the block above it, a three-high tower formed one 6,000,000 FE pool, a broken tower re-formed at 4,000,000, and separated accumulators stayed singles, and every block drops itself"

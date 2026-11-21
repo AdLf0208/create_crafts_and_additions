@@ -1,21 +1,18 @@
 {
-  "type": "minecraft:block",
   "pools": [
     {
-      "bonus_rolls": 0.0,
-      "conditions": [
-        {
-          "condition": "minecraft:survives_explosion"
-        }
-      ],
+      "condition": {
+        "type": "minecraft:survives_explosion"
+      },
       "entries": [
         {
-          "type": "minecraft:item",
-          "name": "createaddition:large_connector"
+          "name": "createaddition:large_connector",
+          "type": "minecraft:item"
         }
       ],
-      "rolls": 1.0
+      "rolls": 1
     }
   ],
-  "random_sequence": "createaddition:blocks/large_connector"
+  "random_sequence": "createaddition:blocks/large_connector",
+  "type": "minecraft:block"
 }

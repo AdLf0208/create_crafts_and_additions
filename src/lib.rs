@@ -15,7 +15,7 @@ mod network;
 use std::sync::{Arc, Mutex};
 
 use mod_api::{
-  self, Command, Flow, Hooks, HostSide, LevelTickPostEvent, RegisterCommandsEvent, Registrar,
+  self, Flow, Hooks, HostSide, LevelTickPostEvent, RegisterCommandsEvent, Registrar,
   RegistrationContext, RunModCommandEvent, ServerHost,
 };
 
@@ -52,6 +52,14 @@ impl Hooks for Mod {
     registrar.block_energy(&small, Kind::Small.buffer());
     registrar.block_energy(&large, Kind::Large.buffer());
     registrar.block_energy(&accumulator, Kind::Accumulator.buffer());
+
+    // The accumulator answers the ENERGY capability itself, ahead of the game's own one-block
+    // buffer: a formed tower's pooled charge and its `blocks * 2,000,000` capacity are what a
+    // neighbour sees, as upstream's controller answers for every part of the multiblock
+    // (`handlerForCapability`). The connectors keep the declared buffer.
+    registrar.block_capability_before_game(&mod_api::ENERGY, &accumulator, |_, at, _, entity| {
+      entity.map(|_| network::accumulator_energy(at.level, at.pos))
+    });
   }
 
   /// After the level's tick: one pass over the blocks whose tick ran, so a network of many
@@ -78,9 +86,7 @@ impl Hooks for Mod {
   /// `/createaddition info|energy|link|unlink|mode`: the harness's readout and the controls the
   /// GUI and Create's wrench would give a player (neither is in this slice).
   fn register_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
-    for usage in network::command_usages() {
-      event.commands.push(Command::new(usage));
-    }
+    event.commands.extend(network::command_declarations());
   }
 
   /// Run the five usages [`Hooks::register_commands`] declares, after the game parsed and

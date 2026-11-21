@@ -19,6 +19,11 @@ CONNECTOR = re.compile(
 ACCUMULATOR = re.compile(
     r"^Modular Accumulator at (-?\d+),(-?\d+),(-?\d+): (\d+)/(\d+) FE \(t=(\d+)\)$"
 )
+# A formed tower: `... 5000000/6000000 FE, tower 1x3 at 220,100,0 (t=1234)`.
+TOWER = re.compile(
+    r"^Modular Accumulator at (-?\d+),(-?\d+),(-?\d+): (\d+)/(\d+) FE, "
+    r"tower (\d+)x(\d+) at (-?\d+),(-?\d+),(-?\d+) \(t=(\d+)\)$"
+)
 
 
 TAG = re.compile(r" \[#\w+\]$")
@@ -48,6 +53,33 @@ def main() -> int:
             "t": ticks,
         }
     else:
+        tower = TOWER.match(line)
+        if tower:
+            x, y, z, energy, capacity, width, height, cx, cy, cz, ticks = tower.groups()
+            values = {
+                "kind": "accumulator",
+                "large": 0,
+                "x": x,
+                "y": y,
+                "z": z,
+                "mode": "none",
+                "energy": energy,
+                "capacity": capacity,
+                "links": 0,
+                "pool_ready": 0,
+                "pool_next": 0,
+                "demand": 0,
+                "tower_w": width,
+                "tower_h": height,
+                "tower_x": cx,
+                "tower_y": cy,
+                "tower_z": cz,
+                "t": ticks,
+            }
+            for name, value in values.items():
+                print(f"{name}={value}")
+            print("ok=1")
+            return 0
         match = ACCUMULATOR.match(line)
         if not match:
             print("ok=0")
@@ -66,6 +98,11 @@ def main() -> int:
             "pool_ready": 0,
             "pool_next": 0,
             "demand": 0,
+            "tower_w": 1,
+            "tower_h": 1,
+            "tower_x": x,
+            "tower_y": y,
+            "tower_z": z,
             "t": ticks,
         }
     for name, value in values.items():

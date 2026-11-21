@@ -54,6 +54,9 @@ BLOCK_MODELS = [
     "block/connector/large/push",
     "block/connector/large/item",
     "block/modular_accumulator/block_single",
+    "block/modular_accumulator/block_bottom",
+    "block/modular_accumulator/block_middle",
+    "block/modular_accumulator/block_top",
     "block/modular_accumulator/item",
 ]
 ITEM_MODELS = [f"item/{item}" for item in ITEMS] + [
@@ -162,6 +165,32 @@ def patched_model(jar: zipfile.ZipFile, member: str) -> str:
     return json.dumps(model, indent=2) + "\n"
 
 
+def loot_table_26_3(jar: zipfile.ZipFile, block: str) -> str:
+    """One block loot table, rewritten from 1.21.1's shape into 26.3's.
+
+    The jar is correct for 1.21.1: its pools carry `"conditions": [ {...} ]`
+    whose object names its kind with `"condition"`, plus `"bonus_rolls": 0.0`
+    and `"rolls": 1.0`. 26.3's own block tables (the prepared resources'
+    `data/minecraft/loot_table/blocks/*.json`) have a singular
+    `"condition": {"type": ...}`, no `bonus_rolls`, and `"rolls": 1`; carried
+    verbatim, the 1.21.1 form makes the block drop nothing at all.
+    """
+    table = json.loads(jar.read(f"data/{NS}/loot_table/blocks/{block}.json"))
+    for pool in table.get("pools", []):
+        pool.pop("bonus_rolls", None)
+        conditions = pool.pop("conditions", None)
+        if conditions:
+            condition = dict(conditions[0])
+            if "condition" in condition and "type" not in condition:
+                condition["type"] = condition.pop("condition")
+            pool["condition"] = condition
+        rolls = pool.get("rolls")
+        if isinstance(rolls, float) and rolls.is_integer():
+            pool["rolls"] = int(rolls)
+    # 26.3's tables lay their keys out alphabetically; so does this.
+    return json.dumps(table, indent=2, sort_keys=True) + "\n"
+
+
 def blockstate_connector(size: str) -> str:
     parts = []
     for facing in FACING_VALUES:
@@ -247,6 +276,9 @@ def build(root: Path) -> None:
         }
         write(root, f"data/{NS}/horizon/block/{block}.json", json.dumps(entry, indent=2) + "\n")
 
+    # The accumulator declares the jar's own `top`/`bottom` multiblock bits: the
+    # tower's highest block has `top`, its lowest `bottom`, and a single block both
+    # (`ModularAccumulatorBlock.notifyMultiUpdated`).
     accumulator = {
         "template": "minecraft:iron_block",
         "item": True,
@@ -256,6 +288,11 @@ def build(root: Path) -> None:
             "requires_tool": True,
             "sounds": "minecraft:copper_block",
         },
+        "state_properties": {
+            "top": {"type": "boolean"},
+            "bottom": {"type": "boolean"},
+        },
+        "default_state": {"top": "true", "bottom": "true"},
     }
     write(
         root,
@@ -276,14 +313,13 @@ def build(root: Path) -> None:
     # --- blockstates -------------------------------------------------------
     write(root, f"assets/{NS}/blockstates/connector.json", blockstate_connector("small"))
     write(root, f"assets/{NS}/blockstates/large_connector.json", blockstate_connector("large"))
+    # The accumulator's blockstate is the jar's own multipart over `top`/`bottom`
+    # (single / top / middle / bottom), carried verbatim: it names only this mod's
+    # models.
     write(
         root,
         f"assets/{NS}/blockstates/modular_accumulator.json",
-        json.dumps(
-            {"variants": {"": {"model": f"{NS}:block/modular_accumulator/block_single"}}},
-            indent=2,
-        )
-        + "\n",
+        jar.read(f"assets/{NS}/blockstates/modular_accumulator.json").decode(),
     )
 
     # --- models and textures ----------------------------------------------
@@ -311,14 +347,27 @@ def build(root: Path) -> None:
             + "\n",
         )
 
-    # --- loot tables (the jar's own are already the singular 26.3 shape) ---
+    # --- loot tables, in 26.3's own shape (the jar's are 1.21.1's) ---------
     for block in BLOCKS:
-        name = f"{NS}/loot_table/blocks/{block}.json"
         write(
             root,
             f"data/{NS}/loot_table/blocks/{block}.json",
-            jar.read(f"data/{name}").decode(),
+            loot_table_26_3(jar, block),
         )
+
+    # --- the harvest tag ---------------------------------------------------
+    # The jar lists all 17 of its blocks in `minecraft:mineable/pickaxe`; this package ships
+    # three of them. Without the tag an iron pickaxe is not "correct for drops" on our blocks,
+    # and `requires_tool: true` then makes a real break drop **nothing** (found in game:
+    # `items_left_on_ground: 0`). Only the carried blocks are listed: a tag value naming an
+    # unregistered id is dead data.
+    jar_tag = json.loads(jar.read("data/minecraft/tags/block/mineable/pickaxe.json"))
+    values = [name for name in jar_tag["values"] if name.split(":", 1)[1] in BLOCKS]
+    write(
+        root,
+        "data/minecraft/tags/block/mineable/pickaxe.json",
+        json.dumps({"values": values}, indent=2) + "\n",
+    )
 
     # --- lang --------------------------------------------------------------
     jar_lang = json.loads(jar.read(f"assets/{NS}/lang/en_us.json"))

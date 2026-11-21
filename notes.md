@@ -121,12 +121,15 @@ agree.
    (conserved, spendable when the network is re-linked), which the 0.1.0 control
    leg shows (`pool 0/1000` while nothing moves).
 6. **Mode is set by a command, not Create's wrench** (not installed).
-7. **The accumulator is one block.** The multiblock (up to 5 high × 3 wide,
-   `getTotalAccumulatorSize()`) is a gap; the block behaves as a single block of
-   the tower (2,000,000 FE, 5,000/t, feeds UP and DOWN). A consequence, measured
-   in the 0.1.0 e2e: two **stacked single** accumulators trade energy both ways
-   and settle at zero in the upper one — upstream would have merged them into
-   one controller, which is exactly the missing multiblock.
+7. **The accumulator was one block (0.2.0–0.2.1); 0.2.2 forms the tower.** The
+   multiblock gap is closed: contiguous accumulators up to 3×3 wide and 5 high
+   form one controller with `blocks * 2,000,000` FE, the jar's `top`/`bottom`
+   bits, and every part answering with the pool — see
+   [`## Slice 2 — the modular accumulator multiblock (0.2.2)`](#slice-2--the-modular-accumulator-multiblock-022).
+   Two stacked singles no longer trade energy both ways: a formed tower's lowest
+   block outputs only DOWN and its highest only UP (`tickOutput` gated by the
+   jar's own state bits), which is the behaviour the 0.1.0 run measured wrong.
+
 8. **A foreign block's mode is read as "it can give" (0.2.0).** The SDK's
    `EnergyHandler` has `amount`/`capacity`/`insert`/`extract` and **no**
    `can_insert`/`can_extract`; the retired pin's `EnergyInfo` had both. So a
@@ -194,15 +197,14 @@ The ruling above is about the Java mod; a migration must not carry **our** bugs 
    that wire's own kind), unit-tested by
    `an_empty_spool_hands_back_one_spool_of_each_wires_own_kind`. Same blocked proof.
 
-## Gaps (the rest of the mod, and the verification that cannot run)
+## Gaps (the rest of the mod, and what cannot run)
 
-- **The in-game e2e has not been run against this package.** `cargo horizon-mod build` packs;
-  the native compile is `horizon-launcher native-build … --trust-native-code`, and
-  `horizon-launcher` is **not installed** in this environment, so no `0b14f8a` game exists
-  here. `tools/e2e.sh` is updated for a launcher-built game (`GAME=`, optional
-  `CONTROL_GAME=`, `SELFTEST=1` kept) and its assertions are unchanged; the 0.1.0 runs in
-  `ports/_shared/evidence/createaddition/e2e-*.log` are **historical** (retired format). A
-  claimed e2e without a launcher would be a rejected report, so this is recorded instead.
+- **The in-game e2e now runs, at `0a875da` (0.2.2).** 0.2.0/0.2.1 could not run one: the native
+  compile needs `horizon-launcher`, which was not installed then. It is now
+  (`launcher-game.sh ensure`, launcher 0.2.92), and the whole scenario — A–H, including the
+  accumulator tower, the drop leg and the control/selftest legs — passes in a launcher-built game;
+  `ports/_shared/evidence/createaddition-e2e/e2e-tower.log` is that run, `…-control.log`,
+  `…-selftest.log` and `…-loot-prefix.log` the legs that must fail.
 - **The rotation half**: `electric_motor`, `alternator`, `rolling_mill`,
   `tesla_coil`, `servo_motor`, and the `charging/` recipe type (40+ oxidisation
   and charging recipes). Blocked by the missing mod-to-mod API: a rotation
@@ -242,7 +244,7 @@ The ruling above is about the Java mod; a migration must not carry **our** bugs 
 | runtime carried | `cp` + `cmp` + `sha256sum` | byte-identical, `03721ca4…f962`; packaged `src/runtime.rs` has the same sha256 |
 | runtime tests, **before any glue existed** | `cargo test --offline` on the skeleton (`src/lib.rs` = `pub mod runtime;`) | **30 passed**, 0 failed (that run's log was overwritten by the final one; the fact is the ladder's, and `sdk-glue-red.log` is the run right after, with the glue stubs in place) |
 | glue first red | same | **30 passed, 10 failed** on `todo!()` / the assertion diffs, exit 101 (`sdk-glue-red.log`) |
-| tests | `cargo test --offline` | **41 passed**, 0 failed (`sdk-test.log`) |
+| tests | `cargo test --offline` | **41 passed**, 0 failed (`sdk-test-0.2.0.log`; `sdk-test.log` carries 0.2.2's 53) |
 | lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
 | formatting | `cargo fmt --check` | clean (`sdk-fmt.log`) |
 | package | `rm -f Cargo.lock && cargo horizon-mod build` | `target/horizon-mod/createaddition.hmod`, exit 0 (`sdk-build.log`) |
@@ -436,3 +438,225 @@ proved with `cmp` and `sha256sum`, and re-proved inside the package with
 > Not carried: the in-game run (no launcher at this pin).
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port
+
+## Review fixes (2026-11-18, PR #1244 — held)
+
+The reviewer held this PR on three package findings (and two entry-only ones):
+
+1. **Every command was level 0.** `energy`, `mode`, `link` and `unlink` wrote to arbitrary loaded
+   coordinates in the caller's level: remote tampering, free stored FE, and wire links without a
+   spool. **Fix:** `energy`, `link` and `unlink` are `Command::op(…, 2)`; `info` and `mode` remain
+   player controls at level 0 but require the acting player to be within six blocks of the block
+   (`within_reach`/`has_access`), while the console and command blocks keep acting anywhere.
+2. **Wire removal refunded without reciprocal state.** `remove_wires` removed each side
+   independently, refunded every wire on the clicked connector even when the peer was unloaded or
+   its write failed, and left the peer's endpoint as a live edge that could be refunded again.
+   **Fix:** `reciprocal_wires` selects only edges the peer also records; the peer's edit is
+   committed and re-read first, then this connector's, and a spool is returned only for a wire
+   confirmed gone from **both** saved lists. A failed or unloaded peer leaves the edge and refunds
+   nothing.
+3. **Entry (not the package):** the upstream link and the MRH0 credit are in
+   `mods/createaddition.toml`, which the orchestrator owns; this package's `horizon-mod.toml`
+   already lists `MRH0 (upstream)` and has no relative link. Left for the entry fix.
+- **Harness fix found in the run.** The optional `tag` argument was `word`, which the dispatcher
+  refuses for the `#q1` markers the e2e sends (`Expected whitespace to end one argument`); it is a
+  trailing `text` now.
+- **Tests.** `the_mutating_commands_are_operator_only_and_the_controls_are_not`,
+  `a_block_beyond_reach_is_not_a_player_control`, `a_wire_is_removed_only_where_the_peer_records_it`.
+- **In-game.** All command phases pass (energy, wire, unlink, limits, accumulator); evidence
+  `../_shared/evidence/createaddition-e2e/e2e-launcher.log` (`PASS` + `EXIT:0`) and
+  `e2e-launcher-control.log` (`EXIT:1`); checker green.
+- **Package.** `createaddition.hmod`, **0.2.1**, 121,378 B, sha256
+  `16ce1dec5e002333871794ca3839e837b6d3b04a7b0139d2c1d52ca36926d50c`; two builds byte-identical,
+  `check` and `fits --build 0b14f8a` exit 0.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review
+
+---
+
+## Slice 2 — the modular accumulator multiblock (0.2.2)
+
+### The slice, and the gap lines it comes from
+
+Two lines of this port's own record, both fixed by this slice:
+
+> **Gaps**: "The rotation half … The accumulator is one block. The multiblock (up to 5 high × 3
+> wide, `getTotalAccumulatorSize()`) is a gap" — 0.1.0's `## Gaps`, carried into 0.2.0.
+
+> **Deviations** 7: "two **stacked single** accumulators trade energy both ways and settle at zero
+> in the upper one — upstream would have merged them into one controller, which is exactly the
+> missing multiblock."
+
+**Choice.** The multiblock is the highest-value family left inside the `deep` row's *FE half*: it
+is the one behaviour the FE half still got visibly wrong, it is a multiblock (the family the parity
+ruling of 2026-11-20 calls out as the usual "it registers, so it must work" illusion), and it needs
+no Create. The rotation half (`electric_motor`, `alternator`, `rolling_mill`, `tesla_coil`,
+`servo_motor`) stays a gap: it needs the parent's kinetic API, which a package cannot reach
+(`ports/_shared/external/create-horizon-architecture.md` §0).
+
+**Tier fit.** `deep`: a block entity with formation state, a dynamic capability, per-block saved
+data and a level pass — not a `data` registration, not a plain `machines` GUI. No renderer, no
+dimension, no entity AI: nothing beyond the row.
+
+### What it does (upstream `CAConnectivityHandler` / `ModularAccumulatorBlockEntity`)
+
+- **Formation.** Contiguous accumulator blocks form one tower: a square footprint up to **3×3**
+  and up to **5 high** (`accumulator_max_width`/`accumulator_max_height`), anchored at its lowest
+  corner, which is the controller. The pass plans the largest box from the lowest free block and
+  repeats for the remainder (`plan_towers`), which is upstream's greedy `formMulti` order.
+  Capacity is `width² × height × 2,000,000` FE (`getTotalAccumulatorSize` ×
+  `accumulator_capacity`); 45 blocks is 90,000,000 FE.
+- **One pool behind every block.** Registered **ahead of the game's own** energy provider
+  (`Registrar::block_capability_before_game(&ENERGY, …)`, `AccumulatorEnergy` in `network.rs`), the
+  accumulator's `ENERGY` capability answers with the tower's whole charge and its whole capacity,
+  as upstream's `handlerForCapability` gives every part the controller's storage. A connector on
+  any block therefore drains the tower, not one block's 2,000,000.
+- **Charge per block, not in the controller.** Each block keeps its 2,000,000 FE in its own saved
+  compound (`energy`, the SDK's own key), so a split loses nothing and a 0.2.1 save stays readable.
+  A store fills lowest-first and a drain takes highest-first (`store_tower`/`drain_tower`), both
+  capped at the accumulator's 5,000 FE a call (`accumulator_max_input`/`_output`).
+- **The jar's `top`/`bottom` bits.** Each member's state carries `top` (its layer is the tower's
+  highest) and `bottom` (lowest); only those output to the block above/below (`tickOutput`), so a
+  tower never feeds itself and two stacked accumulators no longer trade both ways.
+- **Content.** The jar's own four-part blockstate (`block_single`/`block_top`/`block_middle`/
+  `block_bottom`) and the three models are carried, so the tower looks like the jar's and
+  `ctl block` reads the bits.
+
+### The SDK fact this needed
+
+`Registrar::block_energy` (`ModEnergyBuffer`) is a **static** declaration per block: capacity,
+per-call limits and faces, with the amount in the compound. A multiblock's capacity is not static.
+The pin's `block_capability_before_game` (NeoForge's `RegisterCapabilitiesEvent` priority) is what
+lets a mod answer `ENERGY` itself ahead of that declaration — the handler gets the `Host` in every
+method, and `merge_data` inside a transaction is rolled back on abort, so a pooled insert/extract
+stays all-or-nothing. `cargo horizon-mod hooks block_capability` is the reference.
+
+### Red → green (TDD)
+
+The rules went in as failing tests first, against the 0.2.1 behaviour (every block its own tower;
+one block's charge), then the glue. `red-tower.log`:
+
+```
+thread 'network::tests::a_column_of_three_is_one_tower_of_six_million_fe' panicked at src/network.rs:1735:5:
+assertion `left == right` failed
+  left: (1, 1)
+ right: (1, 3)
+thread 'network::tests::a_three_by_three_plate_is_one_tower_of_eighteen_million_fe' panicked at src/network.rs:1756:5:
+assertion `left == right` failed
+  left: (1, 1)
+ right: (3, 1)
+thread 'network::tests::a_column_of_six_is_a_five_high_tower_and_a_single' panicked at src/network.rs:1777:5:
+assertion `left == right` failed
+  left: (1, 1)
+ right: (1, 5)
+thread 'network::tests::a_cube_and_a_stray_block_form_the_largest_box_and_a_single' panicked at src/network.rs:1798:5:
+assertion `left == right` failed
+  left: (1, 1)
+ right: (2, 2)
+thread 'network::tests::storing_fills_the_lowest_block_first_and_draining_takes_the_highest_first' panicked at src/network.rs:1811:5:
+assertion `left == right` failed
+  left: 2000000
+ right: 5000000
+thread 'network::tests::a_tower_never_gives_more_than_its_blocks_hold' panicked at src/network.rs:1839:5:
+assertion `left == right` failed
+  left: 0
+ right: 1000000
+test result: FAILED. 46 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Green: **53 passed, 0 failed** (`sdk-test.log`) — the 12 new tests are the tower planner, the
+top/bottom roles, the saved geometry round-trip and the fill/drain order.
+
+### The two carry errors, and the tag one (same class)
+
+The Java mod is **correct** in all three. What was wrong was this port's carried JSON: it was in
+**1.21.1's dialect**, and 26.3 accepted it at load, in `check`, in `fits` and in every unit test
+while the data did nothing in game.
+
+| # | What | Evidence | Now |
+|---|---|---|---|
+| 1 | **Recipe ingredients** (`{"item": …}` / `{"tag": …}` where 26.3 wants a bare string) — the class `mekanism` confirmed in game | **not present here**: this slice carries no recipe at all (they need `create:` items, `CONTENT.md`), so there is nothing to convert | `tools/data_shape.py` checks it, so a later slice that carries recipes cannot ship the object form |
+| 2 | **Loot pool conditions** in the 1.21.1 array form with `bonus_rolls` | `tools/data_shape.py` on 0.2.2's first build: 3 tables, 9 problems; a real break with an iron pickaxe dropped **0** (`e2e-loot-prefix.log`, `broke and dropped 0`) | `carry_content.py` rewrites each pool to 26.3's shape: singular `"condition": {"type": "minecraft:survives_explosion"}`, no `bonus_rolls`, `rolls: 1` — the shape of `data/minecraft/loot_table/blocks/acacia_button.json` in the prepared resources. `--check` re-derives it; `data_shape.py` green; a real break drops **1** |
+| 3 | **The harvest tag was not carried at all** (found by the same break leg) | a real break in survival with an iron pickaxe broke the block and left `items_left_on_ground: 0`: `requires_tool: true` plus no `minecraft:mineable/pickaxe` membership means no tool is ever "correct for drops" | `carry_content.py` carries `data/minecraft/tags/block/mineable/pickaxe.json` for the three carried blocks (the jar lists all 17 it registers) |
+
+`tools/data_shape.py` is the generalised check (the idea of
+`ports/modularrouters/tools/data_shape.py`, widened to also flag `bonus_rolls`, the inner
+`"condition"` spelling and `1.0` rolls, and fixed to keep the whole path when reading a `--data`
+tree — the shared copy classified a bare `connector.json` by its file name and skipped it):
+
+```
+$ python3 tools/data_shape.py createaddition.hmod      # 0.2.2's first build: red
+  FAIL … loot_table/blocks/connector.json: 1.21.1 loot pool — pool 0: "conditions": [{"condition": "minecraft:survives_explosion"}] (26.3 uses "condition": {...})
+  FAIL … loot_table/blocks/connector.json: 1.21.1 loot pool — pool 0: "bonus_rolls": 0.0 (26.3 has no such key)
+  FAIL … loot_table/blocks/connector.json: 1.21.1 loot pool — pool 0: "rolls": 1.0 (26.3 spells an integral roll 1)
+  (… the same three for large_connector.json and modular_accumulator.json; 9 problems)
+$ python3 tools/data_shape.py createaddition.hmod      # the delivered package: green
+  ok   … every one in the 26.3 dialect
+```
+
+### In-game (launcher-built game at `0a875da`; `e2e-tower.log`, `EXIT:0`)
+
+```
+== G: three stacked accumulators form one tower of 6,000,000 FE ==
+  createaddition:modular_accumulator[bottom=true,top=false]
+  createaddition:modular_accumulator[bottom=false,top=false]
+  createaddition:modular_accumulator[bottom=false,top=true]
+  Modular Accumulator at 220,100,0: 0/6000000 FE, tower 1x3 at 220,100,0 (t=754)
+== G2: one pool — 5,000,000 FE into the top block is read from every part ==
+  Modular Accumulator at 220,102,0: 5000000/6000000 FE, tower 1x3 at 220,100,0 (t=769)
+  Modular Accumulator at 220,100,0: 5000000/6000000 FE, tower 1x3 at 220,100,0 (t=776)
+== G3: breaking the top re-forms the tower at four million ==
+  Modular Accumulator at 220,101,0: 4000000/4000000 FE, tower 1x2 at 220,100,0 (t=844)
+== G4: a formed tower serves a wire from its pooled charge ==
+  tower 3992960->3875920, sink 7040->124080, pool 0, total 4000000->4000000
+== G5: CONTROL — three separated accumulators stay singles of 2,000,000 FE ==
+  separate stack seeded 5000000 holds 2000000/2000000, the block two above 0
+== H: every block's loot table drops the block itself (the 26.3 dialect) ==
+  createaddition:connector: broke and dropped 1 (held 0 -> 1)
+  createaddition:large_connector: broke and dropped 1 (held 0 -> 1)
+  createaddition:modular_accumulator: broke and dropped 1 (held 0 -> 1)
+PASS: …
+EXIT:0
+```
+
+Why these can fail: G2's 5,000,000 seed is **impossible** on the 0.2.1 package (the command clamps a
+single block at 2,000,000, which is exactly what G5 measures on three separated blocks); G3's
+4,000,000 is what only two blocks that kept their own charge can report; G4's conservation is the
+same assertion that caught the 0.1.0 pool bug; H's `dropped 1` was `dropped 0` on 0.2.2's first
+build (`e2e-loot-prefix.log`); and `SELFTEST=1` (`e2e-tower-selftest.log`) plus the game without
+the package (`e2e-tower-control.log`) both exit 1.
+`check-e2e-logs.py createaddition createaddition-e2e --strict`: **logs=9 ok=9 missing-exit=0
+bad-exit=0**.
+
+### Coverage (this slice's families)
+
+| family | status |
+|---|---|
+| tower formation, controller, `blocks × 2,000,000` capacity | **tested** — G (state bits on all three blocks; `tower 1x3 at 220,100,0`, `0/6000000`) |
+| one pool behind every part (capability ahead of the game's) | **tested** — G2 (`5000000/6000000` from the top **and** the bottom) |
+| split on a broken block, per-block charge kept | **tested** — G3 (`4000000/4000000` at `tower 1x2`) |
+| output sides gated by `top`/`bottom` | **tested** — G's bits, F's single-block UP feed, G4's conservation (no self-feed) |
+| a formed tower serves a wire | **tested** — G4 (`tower 3992960->3875920`, sink `7040->124080`, conserved) |
+| separated accumulators stay singles | **tested** — G5 (2,000,000 cap, neighbours 0) |
+| each block's loot table | **tested** — H (each of the three drops 1 when broken) |
+| recipes | **not ported** — every one needs `create:` items (`CONTENT.md`) |
+| comparator output, goggles/display source | **not ported** — `analog_output` exists at this pin; a later slice |
+
+### Deviations of this slice (declared)
+
+1. **Charge per block, not one `EnergyContent` in the controller.** Upstream keeps the tower's
+   whole charge in the controller and redistributes on a split (dropping what will not fit). Here
+   each block keeps its own 2,000,000, the capability sums them, and a split therefore loses
+   nothing. What a player sees is the same: the pool, its capacity, the 5,000 FE a call.
+2. **Formation is decided by the pass, one tick after placement.** Upstream forms on `onPlace` and
+   `neighborChanged`; a package has both hooks, but the block entity is out of the world during its
+   own tick, so the port forms in the level pass it already runs. A tower is one tick late, not
+   absent.
+3. **A store fills lowest-first and a drain takes highest-first.** Upstream's controller has one
+   amount, so the order has no meaning there; here it is the rule that makes a split deterministic
+   (and the e2e's G3 relies on it).
+4. **The plan is deterministic where upstream is greedy per placed block.** `plan_towers` anchors
+   on the lowest free block and repeats, so an L-shape always splits the same way; upstream's
+   `PriorityQueue` over candidate controllers happens to agree on the boxes this slice forms.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review

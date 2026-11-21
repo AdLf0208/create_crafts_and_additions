@@ -1,4 +1,62 @@
-# Validation — Create Crafts & Additions slice 1
+# Validation — Create Crafts & Additions slice 1 and 2
+
+## 0.2.2 — the accumulator multiblock, and the carried data's dialect
+
+Pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (nightly 2026-11-20), mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, SDK cached in `.horizon/sdk/` from
+`ports/_shared/sdk/0a875da`. Every cargo step ran inside one `ports/tools/build-slot.sh` lease
+(`CARGO_INCREMENTAL=0`, no `--target-dir`); `stage`/`check`/`build` locally (`BUILD_LOCAL=1`: the
+second machine has no `cargo-horizon-mod`), `test`/`clippy`/`fmt` on the slot runner. The in-game
+leg is a **launcher-built** game (`ports/tools/launcher-game.sh build createaddition`, launcher
+0.2.92), the `e2e` step through the runner.
+
+Logs quoted here live in `ports/_shared/evidence/createaddition/` (`tower-*.log`) and
+`ports/_shared/evidence/createaddition-e2e/` (`e2e-*.log`).
+
+```
+red (the tower rules as stubs)     46 passed, 6 failed  (red-tower.log)
+cargo test --offline               53 passed, 0 failed  (sdk-test.log)
+cargo clippy --all-targets --offline -- -D warnings   exit 0, 0 warnings (tower-clippy.log)
+cargo fmt --check                  clean              (tower-fmt.log)
+rm -f Cargo.lock && cargo horizon-mod build           exit 0 -> target/horizon-mod/createaddition.hmod (tower-build-1.log)
+cargo horizon-mod build (again)    byte-identical (cmp) (tower-build-2.log)
+cargo horizon-mod check createaddition.hmod           exit 0 (tower-check.log)
+cargo horizon-mod fits createaddition.hmod --build 0a875da   "0a875da  made for" (tower-fits-pin.log)
+cargo horizon-mod fits createaddition.hmod --build 0b14f8a   "0b14f8a  fits"      (tower-fits-0b14f8a.log)
+python3 tools/data_shape.py createaddition.hmod       red: 9 problems (loot-red.log) -> green (loot-green.log)
+python3 tools/carry_content.py --check                "assets/ and data/ match the jar carry"
+python3 ports/tools/verify-sdk-package.py createaddition   1/1 (tests 53, clippy 0, check, fits)
+```
+
+Deliverable: `createaddition.hmod`, **129,771 B**, SHA-256
+`3f64f672d86bf90da7d43643399e565d4851b280f43c8b4c3923d62f88dc137c`, **82 entries**, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too).
+
+```
+createaddition 0.2.2 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  129771 bytes, SHA-256 3f64f672d86bf90da7d43643399e565d4851b280f43c8b4c3923d62f88dc137c, unsigned
+```
+
+```
+Create Crafts & Additions:
+0a875da  made for
+Create Crafts & Additions:
+0b14f8a  fits
+```
+
+### In-game legs (launcher-built game, `horizon-ctl`)
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-tower.log` | `PASS` + `EXIT:0` | A–F (the 0.2.1 scenario, unchanged) + **G** the 3-high tower forms (`tower 1x3 at 220,100,0`, `0/6000000`), **G2** a 5,000,000 seed into the top reads from every part, **G3** breaking the top re-forms at `4000000/4000000`, **G4** the tower's pool serves a wire and FE is conserved at 4,000,000, **G5** three separated blocks stay singles at 2,000,000, **H** each of the three blocks breaks and drops 1 |
+| `e2e-tower-selftest.log` | `FAIL` + `EXIT:1` | the flipped conservation assertion trips |
+| `e2e-tower-control.log` | `FAIL` + `EXIT:1` | the same package assertion on a game **without** the package: no such item |
+| `e2e-loot-prefix.log` | `FAIL` + `EXIT:1` | the **pre-fix** package (1.21.1 loot tables): a real break drops 0 |
+| `e2e-launcher.log`, `e2e-launcher-control.log` | `EXIT:0` / `EXIT:1` | the 0.2.1 run at `0b14f8a` (historical) |
+
+`python3 ports/tools/check-e2e-logs.py createaddition createaddition-e2e --strict`:
+**logs=9 ok=9 missing-exit=0 bad-exit=0**.
 
 ## 0.2.0 — the SDK package (mod API 0.2)
 

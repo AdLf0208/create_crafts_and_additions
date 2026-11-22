@@ -18,9 +18,10 @@ use std::sync::{Arc, Mutex};
 
 use mod_api::{
   self, BlockEntityPart, BlockEntityTickEvent, BlockEntityTicksEvent, BlockKey, BlockPart, Command,
-  CommandArgumentValue, CommandInvocation, Compound, Direction, ENERGY, Host, HostTransaction,
-  InteractionResult, ItemKey, ItemPlace, ItemResource, ItemStack, LevelRef, ModEnergyBuffer,
-  ServerHost, StateForPlacementEvent, Tag, Text, UseItemOnEvent, move_energy,
+  CommandArgumentValue, CommandInvocation, Compound, Direction, ENERGY, Host, HostBlockStates,
+  HostTransaction, InteractionResult, ItemKey, ItemPlace, ItemResource, ItemStack, LevelRef,
+  LightEmissionEvent, ModEnergyBuffer, ServerHost, StateConstraint, StateForPlacementEvent, Tag,
+  Text, UseItemOnEvent, move_energy,
 };
 
 use crate::runtime::{
@@ -36,6 +37,9 @@ pub(crate) const LARGE_CONNECTOR: &str = "createaddition:large_connector";
 pub(crate) const ACCUMULATOR: &str = "createaddition:modular_accumulator";
 /// The redstone relay: a redstone-gated bridge between two wire networks.
 pub(crate) const RELAY: &str = "createaddition:redstone_relay";
+/// The small light connector: a small connector whose lamp draws 1 FE a tick from its
+/// network and lights while the network pays it.
+pub(crate) const LIGHT_CONNECTOR: &str = "createaddition:small_light_connector";
 /// The empty spool: right-clicking a linked connector with it takes the wire out.
 const SPOOL: &str = "createaddition:spool";
 /// The three wire spools, each naming the wire it lays.
@@ -62,6 +66,13 @@ const RELAY_NODES: usize = 8;
 /// The relay bridges at the small connector's rate, the wire kind it connects
 /// (`WireNodeKind.RELAY` reports `ConnectorType.Small`).
 const RELAY_TRANSFER: i32 = 1_000;
+/// The lamp's draw, in FE a tick (`small_light_connector_consumption`, 1 by default).
+const LIGHT_DRAW: i32 = 1;
+/// The lamp's saved hysteresis counter: `tick_toggle_timer` goes up while the network pays
+/// the lamp and down while it does not, and its thresholds are `±light_period`.
+const TOGGLE_TIMER: &str = "tick_toggle_timer";
+/// The light a lit lamp emits, 0 to 15 (`SmallLightConnectorBlock.getLightEmission`).
+const LIGHT_EMISSION: u8 = 15;
 /// One network's saved buffer, in its controller's compound (0.1.0's keys, kept).
 const NET_READY: &str = "netReady";
 const NET_NEXT: &str = "netNext";
@@ -92,13 +103,16 @@ pub(crate) enum Kind {
   /// its output one while powered. Its 1,000 FE is the in-flight buffer, not a declared
   /// capability: upstream's relay exposes no energy storage.
   Relay,
+  /// `createaddition:small_light_connector`: the small connector with a lamp, which draws
+  /// 1 FE a tick out of its network and lights while the network pays it.
+  Light,
 }
 
 impl Kind {
   /// The connector this block is, if it is one.
   fn connector(self) -> Option<Connector> {
     match self {
-      Self::Small => Some(Connector::Small),
+      Self::Small | Self::Light => Some(Connector::Small),
       Self::Large => Some(Connector::Large),
       Self::Accumulator | Self::Relay => None,
     }
@@ -111,6 +125,7 @@ impl Kind {
       Self::Large => "Large Connector",
       Self::Accumulator => "Modular Accumulator",
       Self::Relay => "Redstone Relay",
+      Self::Light => "Small Light Connector",
     }
   }
 
@@ -150,7 +165,7 @@ impl Kind {
   /// not one.
   fn wire_node(self) -> Option<WireNode> {
     match self {
-      Self::Small => Some(WireNode::Connector(Connector::Small)),
+      Self::Small | Self::Light => Some(WireNode::Connector(Connector::Small)),
       Self::Large => Some(WireNode::Connector(Connector::Large)),
       Self::Relay => Some(WireNode::Relay),
       Self::Accumulator => None,
@@ -252,6 +267,7 @@ struct Keys {
   large: BlockKey,
   accumulator: BlockKey,
   relay: BlockKey,
+  light: BlockKey,
   spool: ItemKey,
   copper: ItemKey,
   gold: ItemKey,
@@ -270,6 +286,7 @@ impl Keys {
       large: host.block_key(LARGE_CONNECTOR)?,
       accumulator: host.block_key(ACCUMULATOR)?,
       relay: host.block_key(RELAY)?,
+      light: host.block_key(LIGHT_CONNECTOR)?,
       spool: item(SPOOL)?,
       copper: item(COPPER_SPOOL)?,
       gold: item(GOLD_SPOOL)?,
@@ -277,7 +294,7 @@ impl Keys {
     })
   }
 
-  /// Which of the four blocks `block` is.
+  /// Which of our blocks `block` is.
   fn kind(self, block: BlockKey) -> Option<Kind> {
     if block == self.small {
       Some(Kind::Small)
@@ -287,6 +304,8 @@ impl Keys {
       Some(Kind::Accumulator)
     } else if block == self.relay {
       Some(Kind::Relay)
+    } else if block == self.light {
+      Some(Kind::Light)
     } else {
       None
     }
@@ -538,6 +557,63 @@ fn relay_bridge(powered: bool, buffer: i32, input_ready: i32, output_room: i32) 
   RelayMove { into, out }
 }
 
+/// The lamp's hysteresis period in ticks:
+/// `10 + (|x*31 + y*45 + z*33| % 7) * 3`, `SmallLightConnectorBlockEntity`'s
+/// `posTimeOffset`, so a wall of lamps does not blink in step.
+fn light_period(pos: Pos) -> i32 {
+  const BASE: i64 = 10;
+  const STEP: i64 = 3;
+  let [x, y, z] = [i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2])];
+  let seed = (x * 31 + y * 45 + z * 33).abs();
+  i32::try_from(BASE + (seed % 7) * STEP).unwrap_or(i32::MAX)
+}
+
+/// One tick of the lamp's counter: it rises while the network paid the lamp and falls while
+/// it did not, clamped to `±period`. Answers the new counter and, when this tick crossed a
+/// threshold, the state the lamp takes: `Some(true)` lit, `Some(false)` dark, `None` hold.
+fn light_tick(timer: i32, period: i32, drew: bool) -> (i32, Option<bool>) {
+  let period = period.max(1);
+  let step = if drew { 1 } else { -1 };
+  let next = timer.saturating_add(step).clamp(-period, period);
+  let switched = if next >= period {
+    Some(true)
+  } else if next <= -period {
+    Some(false)
+  } else {
+    None
+  };
+  (next, switched)
+}
+
+/// The lamp's own tick, once per level pass: its counter rises when this tick's network pass
+/// paid it its [`LIGHT_DRAW`] and falls when it could not, and the block's `powered` bit
+/// follows the counter's clamp (`SmallLightConnectorBlockEntity.specialTick`). The bit is the
+/// game's own block state, so the light engine and the jar's on/off models read it.
+fn light_clock(host: &mut dyn ServerHost, level: LevelRef, pos: Pos, saved: &Saved, drew: bool) {
+  if saved.kind != Kind::Light {
+    return;
+  }
+  let timer = int_at(&saved.nbt, TOGGLE_TIMER);
+  let (next, switched) = light_tick(timer, light_period(pos), drew);
+  if next != timer {
+    let mut data = Compound::new();
+    put_int(&mut data, TOGGLE_TIMER, next);
+    if let Some(entity) = host.block_entity(level, pos) {
+      let _ = entity.merge_data(host, data);
+    }
+  }
+  let Some(lit) = switched else {
+    return;
+  };
+  let wanted = if lit { "true" } else { "false" };
+  if level.block_property(host, pos, POWERED).as_deref() != Some(wanted) {
+    let _ = host.set_block_property(pos, POWERED, wanted);
+    // The light engine keeps a cell's answer until it is asked again; a `dynamic_light` block
+    // that answers from its state is asked when the state changes, and this is that ask.
+    level.check_light(host, pos);
+  }
+}
+
 /// The block a connector is mounted on, and the side of that block which faces the connector.
 fn mounted(host: &dyn Host, level: LevelRef, pos: Pos) -> Option<(Pos, Direction)> {
   let facing = level.block_property(host, pos, FACING)?;
@@ -641,7 +717,6 @@ impl BlockPart for ConnectorShape {
 /// The relay's Part: where a placed one sits, and what a spool does with it. A relay takes
 /// wires exactly as a connector does; only its two ports differ, and the link chooses one.
 pub(crate) struct RelayShape;
-
 #[mod_api::horizon_part]
 impl BlockPart for RelayShape {
   /// A relay clicked on the floor lies flat along the placer's view (as upstream rotates the
@@ -674,6 +749,50 @@ impl BlockPart for RelayShape {
     event: &mut UseItemOnEvent<'_>,
   ) -> Option<InteractionResult> {
     spool_click(host, event)
+  }
+}
+
+/// The lamp's Part: a connector's placement and spool click, plus the light its `powered` bit
+/// asks for. The block declares `dynamic_light`, so the light engine asks this part at a cell
+/// (`IBlockExtension.getLightEmission`) instead of taking the block's static `light`.
+pub(crate) struct LightShape;
+
+#[mod_api::horizon_part]
+impl BlockPart for LightShape {
+  /// A placed lamp is mounted on the face it was clicked against, as the small connector is.
+  fn state_for_placement(
+    &self,
+    level: &dyn mod_api::LevelHost,
+    event: &mut StateForPlacementEvent<'_>,
+  ) -> Option<Option<mod_api::BlockState>> {
+    let facing = face_name(event.context.face.opposite());
+    let placed = level.state_with_property(event.state, FACING, facing)?;
+    Some(Some(placed))
+  }
+
+  /// A wire spool clicks a lamp exactly as it clicks a connector.
+  fn use_item_on(
+    &self,
+    host: &mut dyn ServerHost,
+    event: &mut UseItemOnEvent<'_>,
+  ) -> Option<InteractionResult> {
+    spool_click(host, event)
+  }
+
+  /// The lamp glows at full light while its `powered` bit is set (upstream's
+  /// `getLightEmission` answers 15 for the lit state and 0 for the dark one), and the answer
+  /// is the state's alone, so it cannot drift from the bit the pass writes.
+  fn light_emission(&self, host: &dyn Host, event: &mut LightEmissionEvent) -> Option<u8> {
+    let keys = Keys::resolve(host)?;
+    let lit = host
+      .block_states()
+      .matches(
+        event.state,
+        keys.light,
+        &[StateConstraint::new(POWERED, "true")],
+      )?
+      .ok()?;
+    lit.then_some(LIGHT_EMISSION)
   }
 }
 
@@ -1153,16 +1272,25 @@ pub(crate) fn level_ticked(host: &mut dyn ServerHost, level: LevelRef, queued: &
     .iter()
     .flat_map(|(pos, saved)| ports_of(*pos, saved))
     .collect();
-  if nodes.len() < 2 {
-    return;
+  // The lamps paid this tick, so each one's counter can rise only on a tick its network
+  // actually gave it its FE. A lamp outside any network is not in `paid` and falls.
+  let mut paid: BTreeSet<Pos> = BTreeSet::new();
+  if nodes.len() >= 2 {
+    let mut nodes = nodes;
+    nodes.sort_by_key(|(member, _)| *member);
+    let members: Vec<PortMember> = nodes.iter().map(|(member, _)| *member).collect();
+    let wires: Vec<Vec<SavedWire>> = nodes.iter().map(|(_, wires)| wires.clone()).collect();
+    for group in net_groups(&members, &wires) {
+      if group.len() >= 2 {
+        run_network(host, level, keys, &group, &mut paid);
+      }
+    }
   }
-  let mut nodes = nodes;
-  nodes.sort_by_key(|(member, _)| *member);
-  let members: Vec<PortMember> = nodes.iter().map(|(member, _)| *member).collect();
-  let wires: Vec<Vec<SavedWire>> = nodes.iter().map(|(_, wires)| wires.clone()).collect();
-  for group in net_groups(&members, &wires) {
-    if group.len() >= 2 {
-      run_network(host, level, keys, &group);
+  // Every queued lamp ticks its own counter once, network or not: upstream's `specialTick`
+  // runs before the mode check, so an idle or unlinked lamp still counts down and goes dark.
+  for (pos, saved) in &blocks {
+    if saved.kind == Kind::Light {
+      light_clock(host, level, *pos, saved, paid.contains(pos));
     }
   }
 }
@@ -1845,11 +1973,18 @@ struct WireMember {
 }
 
 /// One network's tick: swap the buffer, feed every push connector from it, top the relay's
-/// bridge up (or give its output network what the bridge holds), then draw every pull
-/// connector into it. The buffer lives in the saved compound of the network's
-/// lowest-positioned member, so a reload cannot lose it; a relay's in-flight buffer lives in
-/// the relay's own compound.
-fn run_network(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, members: &[PortMember]) {
+/// bridge up (or give its output network what the bridge holds), pay every lamp its
+/// [`LIGHT_DRAW`], then draw every pull connector into it. The buffer lives in the saved
+/// compound of the network's lowest-positioned member, so a reload cannot lose it; a relay's
+/// in-flight buffer lives in the relay's own compound. `paid` collects the lamps this tick
+/// actually paid, for their own counter.
+fn run_network(
+  host: &mut dyn ServerHost,
+  level: LevelRef,
+  keys: Keys,
+  members: &[PortMember],
+  paid: &mut BTreeSet<Pos>,
+) {
   let nodes: Vec<WireMember> = members
     .iter()
     .filter_map(|&at| {
@@ -1939,6 +2074,17 @@ fn run_network(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, members: 
         if given > 0 {
           buffers.insert(node.at.pos, buffer - given);
         }
+      }
+    }
+    // Every lamp asks its network for its 1 FE a tick (`specialTick`'s `network.demand(1)` and
+    // `pull(consumption, false)`), whichever mode it is in: a lamp is a consumer, not a
+    // connector. The demand sizes the buffer even in a tick that cannot pay; the draw itself
+    // comes out of this tick's ready half, and only a lamp that got its FE counts that tick.
+    for node in nodes.iter().filter(|node| node.kind == Kind::Light) {
+      let took = pool.take(LIGHT_DRAW);
+      wanted += LIGHT_DRAW;
+      if took > 0 {
+        paid.insert(node.at.pos);
       }
     }
     for node in nodes
@@ -2200,6 +2346,31 @@ fn info_line(host: &dyn Host, level: LevelRef, pos: Pos, saved: &Saved) -> Strin
   };
   let charge = int_at(&saved.nbt, CHARGE).max(0);
   let links = links_text(&saved_wires(&saved.nbt));
+  if saved.kind == Kind::Light {
+    let period = light_period(pos);
+    let timer = int_at(&saved.nbt, TOGGLE_TIMER).clamp(-period, period);
+    let lit = level.block_property(host, pos, POWERED).as_deref() == Some("true");
+    return format!(
+      "{} at {},{},{}: mode {}, powered {}, lamp timer {}/{}, draw {} FE/t, \
+       buffer {}/{} FE, links [{}], pool {}/{}, demand {}, t={}",
+      Kind::Light.label(),
+      pos[0],
+      pos[1],
+      pos[2],
+      mode_saved(&saved.nbt).unwrap_or(Mode::None).name(),
+      lit,
+      timer,
+      period,
+      LIGHT_DRAW,
+      charge,
+      connector.max_in().min(connector.max_out()),
+      links,
+      int_at(&saved.nbt, NET_READY),
+      int_at(&saved.nbt, NET_NEXT),
+      int_at(&saved.nbt, NET_DEMAND),
+      time
+    );
+  }
   format!(
     "{} at {},{},{}: mode {}, buffer {}/{} FE, links [{}], pool {}/{}, demand {}, t={}",
     saved.kind.label(),
@@ -3163,6 +3334,116 @@ mod tests {
     assert_eq!(clockwise(Direction::East), Direction::South);
     assert_eq!(counter_clockwise(Direction::East), Direction::North);
     assert_eq!(counter_clockwise(Direction::North), Direction::West);
+  }
+
+  // --- the small light connector -------------------------------------------
+
+  #[test]
+  fn the_light_connector_is_a_small_connector_with_a_lamp() {
+    assert_eq!(Kind::Light.connector(), Some(Connector::Small));
+    assert_eq!(Kind::Light.label(), "Small Light Connector");
+    assert_eq!(
+      Kind::Light.buffer().capacity,
+      Connector::Small.max_in().min(Connector::Small.max_out()),
+      "a lamp is a small connector: its window is the small connector's 1,000 FE"
+    );
+    assert_eq!(
+      Kind::Light.wire_node(),
+      Some(WireNode::Connector(Connector::Small))
+    );
+    assert_eq!(LIGHT_DRAW, 1, "a lamp spends one FE a tick");
+    assert_eq!(LIGHT_EMISSION, 15, "a lit lamp is a full light source");
+  }
+
+  #[test]
+  fn a_lamps_period_is_its_own_ten_to_twenty_eight_tick_cycle() {
+    // `SmallLightConnectorBlockEntity`: 10 + (|x*31 + y*45 + z*33| % 7) * 3.
+    assert_eq!(light_period([0, 64, 0]), 19, "2880 % 7 = 3");
+    assert_eq!(light_period([254, 100, 0]), 25, "12374 % 7 = 5");
+    assert_eq!(
+      light_period([-5, 64, 3]),
+      19,
+      "the seed is taken absolute: 2824 % 7 = 3"
+    );
+    assert_eq!(light_period([1, 64, 0]), 28, "2911 % 7 = 6");
+    for x in -8..8 {
+      for z in -8..8 {
+        let period = light_period([x, 100, z]);
+        assert!(
+          (10..=28).contains(&period),
+          "a lamp at {x},100,{z} cycles in {period} ticks, outside the jar's 10..=28"
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn a_lamp_lights_after_its_period_of_energy_and_darkens_after_as_long_without() {
+    let period = 19;
+    // It starts dark, at a zero counter, and does not light before the period.
+    assert_eq!(light_tick(0, period, true), (1, None));
+    assert_eq!(light_tick(18, period, true), (19, Some(true)));
+    assert_eq!(light_tick(19, period, false), (18, None));
+    // The counter is clamped: a lit lamp asked for more stays lit, the counter held.
+    assert_eq!(light_tick(19, period, true), (19, Some(true)));
+    // From the lit clamp, losing energy for one period reaches zero, and two reaches the
+    // other clamp — which is where the lamp goes dark.
+    assert_eq!(light_tick(1, period, false), (0, None));
+    assert_eq!(light_tick(-18, period, false), (-19, Some(false)));
+    assert_eq!(light_tick(-19, period, false), (-19, Some(false)));
+  }
+
+  #[test]
+  fn a_lamp_that_never_got_energy_goes_dark_and_stays_dark() {
+    let period = 19;
+    let (timer, switched) = light_tick(0, period, false);
+    assert_eq!((timer, switched), (-1, None));
+    assert_eq!(light_tick(-19, period, false), (-19, Some(false)));
+    assert_eq!(light_tick(-19, period, true), (-18, None));
+  }
+
+  #[test]
+  fn the_lamp_rig_draws_one_fe_a_tick_and_conserves_it() {
+    // The e2e's rig in the rules: a source accumulator, a pull connector feeding the wire
+    // network, and a lamp drawing its 1 FE a tick out of the network's pool. The pass order is
+    // the code's: swap the halves, the lamp draws, the pull connector fills what is left.
+    let mut source = 5_000;
+    let capacity = buffer_capacity(2, LIGHT_DRAW);
+    let mut pool = Pool::default();
+    let mut consumed = 0;
+    let mut drops = Vec::new();
+    for _ in 0..20 {
+      let before = source;
+      pool.swap();
+      consumed += pool.take(LIGHT_DRAW);
+      let pulled = pull_amount(1_000, source, pool.room(capacity));
+      pool.put(pulled, capacity);
+      source -= pulled;
+      drops.push(before - source);
+      assert_eq!(
+        source + pool.total() + consumed,
+        5_000,
+        "the lamp spends energy from the network, it never destroys more than it takes"
+      );
+    }
+    assert_eq!(
+      drops.iter().skip(2).copied().collect::<Vec<_>>(),
+      vec![1; 18],
+      "once the pool is full the lamp's 1 FE a tick is exactly one unit of the source a tick"
+    );
+    assert_eq!(consumed, 19, "the lamp drew in every tick but the first");
+    assert_eq!(source + pool.total() + consumed, 5_000);
+  }
+
+  #[test]
+  fn a_lamp_on_a_network_with_no_energy_draws_nothing() {
+    // An unlinked lamp has no pool to draw from: the counter only falls, and no FE leaves
+    // anything. This is the e2e's differential in the rules.
+    let mut pool = Pool::default();
+    assert_eq!(pool.take(LIGHT_DRAW), 0);
+    let (timer, switched) = light_tick(0, light_period([0, 64, 0]), false);
+    assert_eq!((timer, switched), (-1, None));
+    assert_eq!(pool.total(), 0);
   }
 
   #[test]

@@ -3,7 +3,7 @@
 
 The jar is the evidence (`ports/_shared/licence-cache/createaddition-1.7.2.jar`,
 MIT); this script copies the models, textures, item definitions, loot tables and
-lang for the three blocks and seven items of the slice, writes the block and
+lang for the five blocks and seven items of the slice, writes the block and
 item declarations in Horizon's 0.2 schema, and patches the two things the jar
 cannot give Horizon:
 
@@ -30,8 +30,14 @@ ROOT = Path(__file__).resolve().parents[1]
 JAR = ROOT.parent / "_shared/licence-cache/createaddition-1.7.2.jar"
 NS = "createaddition"
 
-# The slice's four blocks and seven items (FINDINGS.md, "Jar inventory").
-BLOCKS = ["connector", "large_connector", "modular_accumulator", "redstone_relay"]
+# The slice's five blocks and seven items (FINDINGS.md, "Jar inventory").
+BLOCKS = [
+    "connector",
+    "large_connector",
+    "small_light_connector",
+    "modular_accumulator",
+    "redstone_relay",
+]
 ITEMS = [
     "copper_wire",
     "gold_wire",
@@ -49,6 +55,15 @@ BLOCK_MODELS = [
     "block/connector/small/push",
     "block/connector/small/item",
     "block/connector/small/block",
+    # The lamp: the small connector's copper body with the bulb, lit and dark
+    # (`SmallLightConnectorBlock.makeBlockState`'s six models plus the item one).
+    "block/connector/small_light/none",
+    "block/connector/small_light/none_off",
+    "block/connector/small_light/pull",
+    "block/connector/small_light/pull_off",
+    "block/connector/small_light/push",
+    "block/connector/small_light/push_off",
+    "block/connector/small_light/item",
     "block/connector/large/none",
     "block/connector/large/pull",
     "block/connector/large/push",
@@ -65,13 +80,15 @@ BLOCK_MODELS = [
 ITEM_MODELS = [f"item/{item}" for item in ITEMS] + [
     "item/connector",
     "item/large_connector",
+    "item/small_light_connector",
     "item/modular_accumulator",
     "item/redstone_relay",
 ]
 # Textures no carried model names (the accumulator's gauge is drawn by its
-# block entity in upstream; the connector's bulb is for the light variant).
+# block entity in upstream; the lamp's bulb has a lit and a dark texture).
 EXTRA_TEXTURES = [
     "block/connector/bulb",
+    "block/connector/bulb_off",
     "block/modular_accumulator/gauge",
 ]
 # The relay's blockstate is the jar's own 16-variant table: it names only this
@@ -118,9 +135,40 @@ FACING_SHAPE = {
     "east": [0.75, 0.375, 0.375, 1.0, 0.625, 0.625],
 }
 
+# The lamp's shape, `SmallLightConnectorBlock.CONNECTOR_SHAPE`: the connector's nub plus the
+# 6x6-pixel bulb standing 4 pixels off it (`CAShapes.shape(6, 0, 6, 10, 5, 10).add(5, 4, 5,
+# 11, 10, 11).forDirectional()`), turned to the face it is mounted on.
+LIGHT_SHAPES = {
+    "down": [
+        [0.375, 0.0, 0.375, 0.625, 0.25, 0.625],
+        [0.3125, 0.25, 0.3125, 0.6875, 0.625, 0.6875],
+    ],
+    "up": [
+        [0.375, 0.75, 0.375, 0.625, 1.0, 0.625],
+        [0.3125, 0.375, 0.3125, 0.6875, 0.75, 0.6875],
+    ],
+    "north": [
+        [0.375, 0.375, 0.0, 0.625, 0.625, 0.25],
+        [0.3125, 0.3125, 0.25, 0.6875, 0.6875, 0.625],
+    ],
+    "south": [
+        [0.375, 0.375, 0.75, 0.625, 0.625, 1.0],
+        [0.3125, 0.3125, 0.375, 0.6875, 0.6875, 0.75],
+    ],
+    "west": [
+        [0.0, 0.375, 0.375, 0.25, 0.625, 0.625],
+        [0.25, 0.3125, 0.3125, 0.625, 0.6875, 0.6875],
+    ],
+    "east": [
+        [0.75, 0.375, 0.375, 1.0, 0.625, 0.625],
+        [0.375, 0.3125, 0.3125, 0.75, 0.6875, 0.6875],
+    ],
+}
+
 LANG_KEYS = [
     "block.createaddition.connector",
     "block.createaddition.large_connector",
+    "block.createaddition.small_light_connector",
     "block.createaddition.modular_accumulator",
     "block.createaddition.redstone_relay",
     "item.createaddition.copper_wire",
@@ -210,6 +258,24 @@ def blockstate_connector(size: str) -> str:
     return json.dumps({"multipart": parts}, indent=2) + "\n"
 
 
+def blockstate_without_variant(jar: zipfile.ZipFile, block: str) -> str:
+    """The jar's own blockstate with the parts this port cannot reach removed.
+
+    `small_light_connector.json` is a multipart over `facing` x `mode` x `powered`
+    (the jar's six models) plus one `girder_base` part per facing, conditioned on
+    the jar's `variant` property. This port does not declare `variant` (the girder
+    mount is not carried, as for the connectors), so those parts are dropped; every
+    remaining part names a property this port declares and only this mod's models.
+    """
+    state = json.loads(jar.read(f"assets/{NS}/blockstates/{block}.json"))
+    parts = [
+        part
+        for part in state.get("multipart", [])
+        if "variant" not in (part.get("when") or {})
+    ]
+    return json.dumps({"multipart": parts}, indent=2) + "\n"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
@@ -285,6 +351,38 @@ def build(root: Path) -> None:
         }
         write(root, f"data/{NS}/horizon/block/{block}.json", json.dumps(entry, indent=2) + "\n")
 
+    # The lamp: the small connector's state with the jar's `powered` bit, and `dynamic_light`
+    # so the light engine asks the block's Part (`LightShape::light_emission`) at a cell
+    # instead of taking a static light for every state.
+    light = {
+        "template": "minecraft:iron_block",
+        "item": True,
+        "properties": {
+            "hardness": 1.5,
+            "explosion_resistance": 6.0,
+            "requires_tool": True,
+            "occludes": False,
+            "sounds": "minecraft:copper_block",
+            "light": 0,
+            "dynamic_light": True,
+        },
+        "state_properties": {
+            "facing": {"type": "enum", "values": FACING_VALUES},
+            "mode": {"type": "enum", "values": MODES},
+            "powered": {"type": "boolean"},
+        },
+        "default_state": {"facing": "north", "mode": "none", "powered": "false"},
+        "shapes": {
+            "properties": ["facing"],
+            "values": LIGHT_SHAPES,
+        },
+    }
+    write(
+        root,
+        f"data/{NS}/horizon/block/small_light_connector.json",
+        json.dumps(light, indent=2) + "\n",
+    )
+
     # The accumulator declares the jar's own `top`/`bottom` multiblock bits: the
     # tower's highest block has `top`, its lowest `bottom`, and a single block both
     # (`ModularAccumulatorBlock.notifyMultiUpdated`).
@@ -353,6 +451,13 @@ def build(root: Path) -> None:
     # --- blockstates -------------------------------------------------------
     write(root, f"assets/{NS}/blockstates/connector.json", blockstate_connector("small"))
     write(root, f"assets/{NS}/blockstates/large_connector.json", blockstate_connector("large"))
+    # The lamp's 36 parts (facing x mode x powered) are the jar's own; its girder parts are
+    # dropped with the `variant` property this port does not declare.
+    write(
+        root,
+        f"assets/{NS}/blockstates/small_light_connector.json",
+        blockstate_without_variant(jar, "small_light_connector"),
+    )
     # The accumulator's and the relay's blockstates are the jar's own: the accumulator's
     # multipart over `top`/`bottom`, the relay's 16-variant table over
     # `facing`/`powered`/`vertical`. Both name only this mod's models.
@@ -380,6 +485,7 @@ def build(root: Path) -> None:
     for item in ITEMS + [
         "connector",
         "large_connector",
+        "small_light_connector",
         "modular_accumulator",
         "redstone_relay",
     ]:
@@ -403,7 +509,7 @@ def build(root: Path) -> None:
 
     # --- the harvest tag ---------------------------------------------------
     # The jar lists all 17 of its blocks in `minecraft:mineable/pickaxe`; this package ships
-    # three of them. Without the tag an iron pickaxe is not "correct for drops" on our blocks,
+    # five of them. Without the tag an iron pickaxe is not "correct for drops" on our blocks,
     # and `requires_tool: true` then makes a real break drop **nothing** (found in game:
     # `items_left_on_ground: 0`). Only the carried blocks are listed: a tag value naming an
     # unregistered id is dead data.

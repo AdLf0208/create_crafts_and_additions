@@ -44,9 +44,9 @@ does not try. The `create:` items its recipes need are likewise absent.
   and pellets, seed-oil/bioethanol buckets, cakes, sandpaper, amulets,
   `digital_adapter`.
 - **The FE half is:** `connector`, `large_connector`, `modular_accumulator`,
-  the wire and spool items, and (not in this slice) `small_light_connector`,
-  `creative_energy`, `portable_energy_interface`, `redstone_relay`,
-  `energy_meter`, `electric_pump`, `digital_adapter`.
+  `redstone_relay`, `small_light_connector`, the wire and spool items, and (not
+  in this slice) `creative_energy`, `portable_energy_interface`, `energy_meter`,
+  `electric_pump`, `digital_adapter`.
 - **The rotation half is:** `electric_motor`, `alternator`, `rolling_mill`,
   `tesla_coil`, `servo_motor`, and the `charging/` recipe type they power.
 
@@ -138,7 +138,10 @@ does not try. The `create:` items its recipes need are likewise absent.
 2. ~~**Single-block accumulator.**~~ **Closed in 0.2.2**: the multiblock (up to 5 high × 3 wide,
    `getTotalAccumulatorSize()`) forms, one pool behind every block, split on a broken block — see
    `notes.md` `## Slice 2`.
-3. **`small_light_connector`** (1 FE/t consumption, festive lamp) is a gap.
+3. ~~**`small_light_connector`** (1 FE/t consumption, festive lamp) is a gap.~~ **Closed in
+   0.2.5**: the lamp, its 1 FE/t network draw, its position-seeded hysteresis (period
+   `10 + (|x*31+y*45+z*33| % 7) * 3`, clamped both ways) and its `powered`-gated block light 15 —
+   `notes.md` `## Slice 5`.
 4. **Node choice from the click point is not reproduced**: the pin's
    `use_item_on` gives the block face, not the click location, so a link takes
    the lowest free node index (upstream: `getAvailableNode(clickLocation)`).

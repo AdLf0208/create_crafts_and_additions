@@ -1,6 +1,7 @@
 {
   "block.createaddition.connector": "Small Connector",
   "block.createaddition.large_connector": "Large Connector",
+  "block.createaddition.small_light_connector": "Small Connector With Light",
   "block.createaddition.modular_accumulator": "Accumulator",
   "block.createaddition.redstone_relay": "Redstone Relay",
   "item.createaddition.copper_wire": "Copper Wire",

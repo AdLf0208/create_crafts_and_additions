@@ -1,11 +1,11 @@
-# Package receipt — createaddition 0.2.4
+# Package receipt — createaddition 0.2.5
 
 | field | value |
 |---|---|
-| version | `0.2.4` |
+| version | `0.2.5` |
 | file | `createaddition.hmod` |
-| bytes | 150,070 |
-| sha256 | `8b5b1c2250b1d884d0b35fdc90a1cff5d46e3de7354dd95640ed34572783eacd` |
+| bytes | 168,353 |
+| sha256 | `854e9d6ac9a8b9af0501310053c8e9c833215694663959501447a15199372b41` |
 | source | this tag — the tree here is the source that produced the archive |
 | game | 26.3 |
 | horizon | `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` |

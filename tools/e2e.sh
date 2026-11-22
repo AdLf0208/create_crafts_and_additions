@@ -39,10 +39,16 @@
 #  I  the redstone relay: an unpowered relay between two accumulators moves nothing
 #     over 20 ticks, a redstone block on its side sets `powered=true` and the sink
 #     then gains FE with the source, both pools and the relay's buffer conserved.
+#  J  the small light connector: dark at 0 FE, lit after its own hysteresis once its
+#     network pays it, exactly 1 FE a tick out of the source (the pool steady), block
+#     light 15 while lit and 0 while dark, and the unlinked differential: dark again and
+#     the source does not move.
 #
 # SELFTEST=1 flips B's conservation assertion (it must FAIL), proving the
 # scenario can fail. RELAY_SELFTEST=1 flips I's unpowered gate assertion instead, so
-# the relay leg's own counterfactual is a run of its own.
+# the relay leg's own counterfactual is a run of its own. LAMP_SELFTEST=1 flips J's
+# unlinked-lamp assertion (the lamp must not draw a single FE), so the lamp's
+# differential is a run of its own too.
 #
 # The 0.1.0 runs of this scenario (PASS/EXIT:0 default, PASS/EXIT:0 with the
 # bundle's embedded content, FAIL/EXIT:1 selftest) are historical evidence for the
@@ -114,7 +120,10 @@ rm -f "$SOCK"
 
 ctl() { "$CTL" --socket "$SOCK" "$@"; }
 say() { ctl chat "/$1" >/dev/null; }
-fail() { echo "FAIL: $*" >&2; ctl logs --lines 60 >&2 || true; exit 1; }
+# `ctl messages` lists the newest line first, so `head` is what just happened and `tail` is the
+# oldest of the window (printing the tail once hid the answer that mattered).
+recent_chat() { chat | head -20; }
+fail() { echo "FAIL: $*" >&2; recent_chat >&2 || true; ctl logs --lines 40 >&2 || true; exit 1; }
 on_error() { echo "FAIL: line $1: '$2' exited $?" >&2; ctl logs --lines 40 >&2 || true; }
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
@@ -207,21 +216,26 @@ chat() { ctl messages 60 | jq -r '.chat[]'; }
 # tag is removed from REPLY.
 command_reply() { # command_reply COMMAND REPLY_PATTERN
     NEXT_TAG=$((NEXT_TAG + 1))
-    local tag pattern
+    local tag pattern round
     tag="q$NEXT_TAG"
     pattern="$2 .*\\[#$tag\\]$"
-    say "$1 #$tag"
-    for _ in $(seq 1 30); do
-        ctl wait 3 >/dev/null
-        if chat | grep -qE "$pattern"; then
-            REPLY=$(chat | grep -E "$pattern" | tail -1)
-            REPLY=${REPLY% "[#$tag]"}
-            REPLY=${REPLY% }
-            return 0
-        fi
+    for round in 1 2; do
+        # A chat line can be lost between the client and the server; the reply, not the send,
+        # is what this waits for, so a second send of the same tagged line costs only ticks and
+        # never weakens the assertion (a command that is refused answers nothing matching).
+        say "$1 #$tag"
+        for _ in $(seq 1 30); do
+            ctl wait 3 >/dev/null
+            if chat | grep -qE "$pattern"; then
+                REPLY=$(chat | grep -E "$pattern" | tail -1)
+                REPLY=${REPLY% "[#$tag]"}
+                REPLY=${REPLY% }
+                return 0
+            fi
+        done
     done
     echo "--- newest chat lines:" >&2
-    chat | tail -15 >&2
+    chat | head -20 >&2
     fail "no reply to /$1 #$tag"
 }
 
@@ -229,7 +243,7 @@ command_reply() { # command_reply COMMAND REPLY_PATTERN
 info() { # info X Y Z
     # The reply names the position, so a line about another block can never be
     # mistaken for this one.
-    command_reply "createaddition info $1 $2 $3" "^(Connector|Large Connector|Modular Accumulator|Redstone Relay) at $1,$2,$3:"
+    command_reply "createaddition info $1 $2 $3" "^(Connector|Large Connector|Small Light Connector|Modular Accumulator|Redstone Relay) at $1,$2,$3:"
     INFO_LINE=$REPLY
     eval "$(python3 "$PORT/tools/parse_info.py" "$INFO_LINE")"
     [ "${ok:-0}" = 1 ] || fail "the info line did not parse: $INFO_LINE"
@@ -351,6 +365,13 @@ control_leg() {
     [ "$(block_name "$relay_at" 101 0)" != "createaddition:redstone_relay" ] \
         || fail "the control game placed a redstone relay, so the block id was known"
     echo "  the control's setblock left $(block_name "$relay_at" 101 0) where the relay would be" >&2
+    # The lamp is this slice's new id: the same package-less game must not know it.
+    local lamp_at=$((X0 + 50))
+    ctl command "execute in minecraft:the_end run setblock $lamp_at 101 0 createaddition:small_light_connector" >/dev/null 2>&1 || true
+    ctl wait 4 >/dev/null
+    [ "$(block_name "$lamp_at" 101 0)" != "createaddition:small_light_connector" ] \
+        || fail "the control game placed a small light connector, so the block id was known"
+    echo "  the control's setblock left $(block_name "$lamp_at" 101 0) where the lamp would be" >&2
     ctl quit >/dev/null 2>&1 || true
 }
 
@@ -408,7 +429,7 @@ break_drop_leg() { # break_drop_leg BLOCK -> sets DROPPED
 if [ "${LOOT_ONLY:-0}" = 1 ]; then
     launch "$GAME" "$WORLD"
     arena
-    for LOOT_BLOCK in createaddition:connector createaddition:large_connector createaddition:modular_accumulator createaddition:redstone_relay; do
+    for LOOT_BLOCK in createaddition:connector createaddition:large_connector createaddition:small_light_connector createaddition:modular_accumulator createaddition:redstone_relay; do
         break_drop_leg "$LOOT_BLOCK"
         [ "$DROPPED" = 1 ] \
             || fail "mining $LOOT_BLOCK dropped $DROPPED of itself, expected the one its 26.3 loot table names"
@@ -756,7 +777,7 @@ echo "== H: every block's loot table drops the block itself (the 26.3 dialect) =
 # `"condition"`; 26.3's own tables (the prepared resources) write one `"condition":
 # {"type": ...}` per pool and have no `bonus_rolls`. Carried verbatim, the 1.21.1 shape made a
 # block drop nothing (`modularrouters` measured 0 while a vanilla table beside it dropped 1).
-for LOOT_BLOCK in createaddition:connector createaddition:large_connector createaddition:modular_accumulator createaddition:redstone_relay; do
+for LOOT_BLOCK in createaddition:connector createaddition:large_connector createaddition:small_light_connector createaddition:modular_accumulator createaddition:redstone_relay; do
     break_drop_leg "$LOOT_BLOCK"
     [ "$DROPPED" = 1 ] \
         || fail "mining $LOOT_BLOCK dropped $DROPPED of itself, expected the one its 26.3 loot table names"
@@ -882,4 +903,125 @@ echo "  powered: source $POWERED_SOURCE->$R_SOURCE, sink $POWERED_SINK->$R_SINK,
     || fail "FE was not conserved across the powered relay: $POWERED_TOTAL -> $R_TOTAL"
 echo "  the powered relay carried $GAINED FE to the sink, conserved at $R_TOTAL" >&2
 
-echo "PASS: FE crossed the wire at 1,000/t and was conserved, an unlinked connector moved nothing, the 16-block limit held, copper was refused between two large connectors, an accumulator fed the block above it, a three-high tower formed one 6,000,000 FE pool, a broken tower re-formed at 4,000,000, separated accumulators stayed singles, a doctored saved tower was refused as its block's own single, every block drops itself, and the redstone relay passed energy only while powered"
+echo "== J: the small light connector lights on its network's one FE a tick =="
+# Upstream (`SmallLightConnectorBlockEntity`): a small connector whose lamp asks its wire
+# network for one FE a tick and keeps a counter, +1 while the network pays it and -1 while it
+# does not, clamped to `10 + (|x*31+y*45+z*33| % 7)*3` either way. At the top clamp it sets
+# `powered` and the block emits light 15; at the bottom clamp it clears it. No Create, no GUI:
+# the lamp's energy is the network's, so the family is a conservation rule plus a block state.
+LAMP_A=$((X0 + 50))
+LAMP_C1=$((LAMP_A + 1))
+LAMP_L=$((LAMP_A + 4))
+LAMP_WALL=$((LAMP_L + 1))
+ctl command "execute in minecraft:the_end run fill $((LAMP_A - 1)) 100 -2 $((LAMP_WALL + 1)) 100 2 minecraft:stone" >/dev/null
+ctl command "execute in minecraft:the_end run fill $((LAMP_A - 1)) 101 -2 $((LAMP_WALL + 1)) 104 2 minecraft:air" >/dev/null
+ctl wait 6 >/dev/null
+# Stand on the pad beside the rig, so every read in this leg is within a player's reach even
+# if the run's operator level is not what the earlier legs assumed.
+ctl command "execute in minecraft:the_end run tp @s $((LAMP_A + 2)).5 101 0.5" >/dev/null
+ctl wait 4 >/dev/null
+place_accumulator "$LAMP_A"
+place_connector "$LAMP_C1" west
+ctl command "execute in minecraft:the_end run setblock $LAMP_L 100 0 createaddition:small_light_connector[facing=east,mode=none,powered=false]" >/dev/null
+ctl wait 6 >/dev/null
+[ "$(block_name "$LAMP_L" 100 0)" = "createaddition:small_light_connector" ] \
+    || fail "the lamp did not place at $LAMP_L,100 (got '$(block_name "$LAMP_L" 100 0)')"
+
+# The jar's own period for this block position, as the block entity computes it.
+lamp_period_at() { # X Y Z -> period in ticks
+    local lx=$1 ly=$2 lz=$3 seed
+    seed=$(( lx * 31 + ly * 45 + lz * 33 ))
+    [ "$seed" -ge 0 ] || seed=$(( -seed ))
+    echo $(( 10 + (seed % 7) * 3 ))
+}
+# `ctl light` answers one hex digit of stored block light (f = 15).
+lamp_light() { ctl light "$1" "$2" "$3" "$1" "$2" "$3" | jq -r '.block // "unknown"'; }
+# The lamp's state string and its own light, asserted together: the bit and the light engine
+# must agree, and `ctl light` reads the engine, not the mod's readout.
+expect_lamp() { # expect_lamp powered(true|false) light(hex)
+    local state light
+    state=$(block_state "$LAMP_L" 100 0)
+    case "$state" in
+        *"powered=$1"*) ;;
+        *) fail "the lamp reads '$state', expected powered=$1" ;;
+    esac
+    light=$(lamp_light "$LAMP_L" 100 0)
+    [ "$light" = "$2" ] || fail "the lamp's block light is '$light', expected '$2'"
+    echo "  $state, block light $light" >&2
+}
+
+LAMP_PERIOD=$(lamp_period_at "$LAMP_L" 100 0)
+echo "  the lamp at $LAMP_L,100,0 cycles in $LAMP_PERIOD ticks (the jar's position-seeded period)" >&2
+info "$LAMP_L" 100 0
+[ "$kind" = light ] || fail "the lamp reads as '$kind'"
+[ "$capacity" = 1000 ] || fail "a lamp's window is $capacity, expected the small connector's 1000"
+[ "$lamp_period" = "$LAMP_PERIOD" ] \
+    || fail "the lamp's readout reports a period of $lamp_period, the jar's formula says $LAMP_PERIOD"
+[ "$mode" = none ] || fail "a lamp mounted on stone settled mode '$mode', expected none"
+
+echo "  -- at 0 FE the lamp is dark and its counter sits at the bottom clamp"
+ctl wait "$((LAMP_PERIOD + 5))"
+expect_lamp false 0
+info "$LAMP_L" 100 0
+[ "$lit" = 0 ] || fail "an unpaid lamp reports itself lit"
+[ "$lamp_timer" = "-$LAMP_PERIOD" ] \
+    || fail "an unpaid lamp's counter is $lamp_timer, expected the bottom clamp -$LAMP_PERIOD"
+
+echo "  -- seeding 5,000 FE and linking the wire lights it"
+seed_at "$LAMP_A" 100 5000
+link "$LAMP_C1" "$LAMP_L" copper
+[ "$LAST_REPLY" = "Nodes linked." ] || fail "the lamp's wire was not laid: $LAST_REPLY"
+# The dark leg left the counter at the bottom clamp, so it needs a full downswing
+# (`2 * period` ticks) to reach the top one: upstream clamps at ±posTimeOffset, and only the
+# top clamp lights the block.
+ctl wait "$((2 * LAMP_PERIOD + 5))"
+expect_lamp true f
+info "$LAMP_L" 100 0
+[ "$lit" = 1 ] || fail "a paid lamp reports itself dark"
+[ "$lamp_timer" = "$LAMP_PERIOD" ] \
+    || fail "a lit lamp's counter is $lamp_timer, expected the top clamp $LAMP_PERIOD"
+
+echo "  -- it draws exactly one FE a tick, and the network's pool holds"
+info "$LAMP_A" 100 0
+LAMP_S1=$energy
+LAMP_T1=$t
+# The network's buffer lives in its lowest member's compound: the connector, not the lamp.
+info "$LAMP_C1" 100 0
+LAMP_P1=$((pool_ready + pool_next))
+[ "$links" = 1 ] || fail "the lamp's connector holds $links wire(s), expected one"
+ctl wait "$TICKS"
+info "$LAMP_C1" 100 0
+LAMP_P2=$((pool_ready + pool_next))
+info "$LAMP_A" 100 0
+LAMP_S2=$energy
+LAMP_T2=$t
+LAMP_TICKS=$((LAMP_T2 - LAMP_T1))
+LAMP_DRAWN=$((LAMP_S1 - LAMP_S2))
+[ "$LAMP_TICKS" -ge "$TICKS" ] || fail "only $LAMP_TICKS ticks passed across the lamp's reading"
+[ "$LAMP_P1" = "$LAMP_P2" ] \
+    || fail "the lamp's network pool moved $LAMP_P1->$LAMP_P2 FE across the reading, so the source is not the only account"
+[ "$LAMP_DRAWN" = "$LAMP_TICKS" ] \
+    || fail "the source lost $LAMP_DRAWN FE over $LAMP_TICKS ticks, expected exactly one a tick"
+[ "$LAMP_S2" -le 5000 ] || fail "the source holds $LAMP_S2 FE of the 5000 seeded"
+expect_lamp true f
+echo "  source $LAMP_S1->$LAMP_S2 over $LAMP_TICKS ticks: $LAMP_DRAWN FE, one a tick, pool steady at $LAMP_P2" >&2
+
+echo "  -- CONTROL: unlinked, the lamp draws nothing and the source does not move"
+unlink "$LAMP_C1" "$LAMP_L"
+[ "$LAST_REPLY" = "Wire removed." ] || fail "the lamp's wire was not removed: $LAST_REPLY"
+info "$LAMP_A" 100 0
+LAMP_S3=$energy
+ctl wait "$((2 * LAMP_PERIOD + 5))"
+expect_lamp false 0
+info "$LAMP_A" 100 0
+LAMP_S4=$energy
+[ "$LAMP_S4" = "$LAMP_S3" ] \
+    || fail "the unlinked lamp drew $((LAMP_S3 - LAMP_S4)) FE from the source"
+echo "  unlinked: the lamp went dark and the source stayed at $LAMP_S4 FE" >&2
+if [ "${LAMP_SELFTEST:-0}" = 1 ]; then
+    # The deliberately wrong expectation: an unlinked lamp MUST have drawn the source. It did
+    # not, so this leg fails — the counterfactual for the assertion above.
+    [ "$LAMP_S3" != "$LAMP_S4" ] || fail "LAMP_SELFTEST: the unlinked lamp drew nothing, so the assertion is alive"
+fi
+
+echo "PASS: FE crossed the wire at 1,000/t and was conserved, an unlinked connector moved nothing, the 16-block limit held, copper was refused between two large connectors, an accumulator fed the block above it, a three-high tower formed one 6,000,000 FE pool, a broken tower re-formed at 4,000,000, separated accumulators stayed singles, a doctored saved tower was refused as its block's own single, every block drops itself, the redstone relay passed energy only while powered, and the small light connector lit from its network's one FE a tick and went dark when unlinked"

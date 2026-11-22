@@ -1,4 +1,73 @@
-# Validation — Create Crafts & Additions slices 1–4
+# Validation — Create Crafts & Additions slices 1–5
+
+## 0.2.5 — the small light connector
+
+Pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (nightly 2026-11-20), mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`; every cargo step inside one
+`ports/tools/build-slot.sh` lease (`CARGO_INCREMENTAL=0`, no `--target-dir`, `BUILD_LOCAL=1`).
+The in-game legs use the launcher-built game (`ports/tools/launcher-game.sh`, launcher 0.2.92);
+the lamp build is `native-0a875da-9e6e38b74abd`.
+
+Logs: `ports/_shared/evidence/createaddition/` (`lamp-red.log`, `lamp-build-*.log`,
+`lamp-check.log`, `lamp-fits-pin.log`, `lamp-fits-other.log`, `sdk-*.log`,
+`verify-sdk-package.log`) and `ports/_shared/evidence/createaddition-e2e/`
+(`e2e-lamp-*.log`).
+
+```
+red, pre-slice lamp rules      4 failed: 68 passed  (lamp-red.log)
+  the period                  left: 10   right: 19
+  the counter lights          left: (0, None)   right: (1, None)
+  a lamp that never got FE    left: (0, None)   right: (-1, None)
+  no network, no draw         left: (0, None)   right: (-1, None)
+cargo test --offline             72 passed, 0 failed              (sdk-test.log)
+cargo clippy --all-targets --offline -- -D warnings   exit 0, 0 warnings (sdk-clippy.log)
+cargo fmt --check                clean                            (sdk-fmt.log)
+rm -f Cargo.lock && cargo horizon-mod build           exit 0       (lamp-build-1.log)
+cargo horizon-mod build (again)  byte-identical (cmp)             (lamp-build-2.log)
+cargo horizon-mod check createaddition.hmod           exit 0       (lamp-check.log)
+fits --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a  "0a875da  made for" (lamp-fits-pin.log)
+fits --build 0b14f8acfd97fa2c750e42795249dcc981178ca4  "does not fit: 1 item changed
+                                                       the method `BlockStates::light_emission` (removed)"
+                                                                   (lamp-fits-other.log)
+python3 tools/data_shape.py createaddition.hmod   5/5 26.3 loot tables
+python3 tools/carry_content.py --check    assets/ and data/ match the jar carry
+python3 tools/check_licence.py    upstream notice verbatim       (licence-notice.log)
+python3 ports/tools/verify-sdk-package.py createaddition   1/1     (verify-sdk-package.log)
+```
+
+Deliverable: `createaddition.hmod`, **168,353 B**, SHA-256
+`854e9d6ac9a8b9af0501310053c8e9c833215694663959501447a15199372b41`, **108 entries**, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too), **79** `assets/` + **18** `data/` files.
+
+```
+createaddition 0.2.5 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  168353 bytes, SHA-256 854e9d6ac9a8b9af0501310053c8e9c833215694663959501447a15199372b41, unsigned
+```
+
+```
+Create Crafts & Additions:
+0a875da  made for
+Create Crafts & Additions:
+0b14f8a  does not fit: 1 item changed
+    the method `BlockStates::light_emission` (removed)
+```
+
+**The second `fits` run is red and that is the measured finding**: the lamp's `light_emission` surface
+(`dynamic_light`, the `BlockPart` hook and the `BlockStates::light_emission` service method) does not
+exist at `0b14f8a` or at `6d765e0` — it is new at the `0a875da` pin. The pin run is therefore not a
+tautology (the older builds show the check discriminates), and no build before the pin can carry this
+family.
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-lamp-default.log` | `PASS` + `EXIT:0` | A–I unchanged, plus **J**: the lamp is dark at 0 FE (`powered=false`, `ctl light` 0, counter `-25/25`); after seeding 5,000 FE and linking it is lit (`powered=true`, `ctl light` f, counter `25/25`); it draws exactly 1 FE/t (`source 4903->4861 over 42 ticks`, pool steady at 26); unlinked it goes dark and the source stays at 4,852 |
+| `e2e-lamp-selftest.log` | `FAIL` + `EXIT:1` | `SELFTEST: the conservation assertion did not trip` (B's counterfactual) |
+| `e2e-lamp-gate-selftest.log` | `FAIL` + `EXIT:1` | `LAMP_SELFTEST: the unlinked lamp drew nothing, so the assertion is alive` (J's own counterfactual) |
+| `e2e-lamp-control.log` | `FAIL` + `EXIT:1` | the package-less game has no accumulator item and no lamp/relay block id |
+
+`python3 ports/tools/check-e2e-logs.py createaddition createaddition-e2e --strict`:
+**logs=20 ok=20 missing-exit=0 bad-exit=0**.
 
 ## 0.2.4 — the redstone relay
 

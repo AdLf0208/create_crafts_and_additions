@@ -2,8 +2,9 @@
 //!
 //! The FE half only: the two connectors with their spools and wire links, the wire network that
 //! moves energy between them at the end of the level's tick, the modular accumulator that
-//! feeds the blocks on its UP and DOWN faces, and the redstone relay that bridges one wire
-//! network into another while its `powered` bit is set.
+//! feeds the blocks on its UP and DOWN faces, the redstone relay that bridges one wire
+//! network into another while its `powered` bit is set, and the small light connector whose
+//! lamp draws 1 FE a tick from its network and lights while it is paid.
 //!
 //! The rules themselves live in [`runtime`], byte-identical to the retired bundle's `runtime.rs`
 //! and tested by `cargo test` without the game. [`network`] is the glue: the block entity Part,
@@ -20,7 +21,7 @@ use mod_api::{
   RegistrationContext, RunModCommandEvent, ServerHost,
 };
 
-use crate::network::{ConnectorShape, Kind, Queue, RelayShape, Ticker};
+use crate::network::{ConnectorShape, Kind, LightShape, Queue, RelayShape, Ticker};
 
 /// The mod's session state: which of its block entities ticked this tick, per level.
 #[derive(Default)]
@@ -30,13 +31,14 @@ struct Mod {
 
 #[mod_api::horizon_mod]
 impl Hooks for Mod {
-  /// Declare the one block entity type the four blocks share (its tick queues the level's
-  /// pass), attach the two Parts, and declare the energy buffer of each block.
+  /// Declare the one block entity type the five blocks share (its tick queues the level's
+  /// pass), attach the Parts, and declare the energy buffer of each block.
   fn register(&self, registrar: &mut dyn Registrar, _context: &RegistrationContext) {
     let small = registrar.block_key(network::CONNECTOR);
     let large = registrar.block_key(network::LARGE_CONNECTOR);
     let accumulator = registrar.block_key(network::ACCUMULATOR);
     let relay = registrar.block_key(network::RELAY);
+    let light = registrar.block_key(network::LIGHT_CONNECTOR);
 
     let kind = registrar
       .block_entity_type("energy")
@@ -45,6 +47,7 @@ impl Hooks for Mod {
         "large_connector",
         "modular_accumulator",
         "redstone_relay",
+        "small_light_connector",
       ])
       .build();
     let attached = registrar.block_entity_part(&kind, Ticker::new(Arc::clone(&self.queue)));
@@ -56,10 +59,14 @@ impl Hooks for Mod {
     registrar.block_part(small, ConnectorShape);
     registrar.block_part(large, ConnectorShape);
     registrar.block_part(relay, RelayShape);
+    // The lamp is a connector with its own Part: the same placement and spool click, plus the
+    // `light_emission` answer its `dynamic_light` declaration asks for.
+    registrar.block_part(light, LightShape);
 
     registrar.block_energy(&small, Kind::Small.buffer());
     registrar.block_energy(&large, Kind::Large.buffer());
     registrar.block_energy(&accumulator, Kind::Accumulator.buffer());
+    registrar.block_energy(&light, Kind::Light.buffer());
 
     // The accumulator answers the ENERGY capability itself, ahead of the game's own one-block
     // buffer: a formed tower's pooled charge and its `blocks * 2,000,000` capacity are what a

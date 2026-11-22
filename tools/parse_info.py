@@ -13,6 +13,13 @@ from __future__ import annotations
 import re
 import sys
 
+# The lamp: `Small Light Connector at 254,100,0: mode none, powered true, lamp timer
+# 25/25, draw 1 FE/t, buffer 0/1000 FE, links [...], pool 26/0, demand 1, t=1234`.
+LIGHT = re.compile(
+    r"^Small Light Connector at (-?\d+),(-?\d+),(-?\d+): mode (\w+), powered (true|false), "
+    r"lamp timer (-?\d+)/(\d+), draw (\d+) FE/t, buffer (\d+)/(\d+) FE, links \[(.*?)\], "
+    r"pool (\d+)/(\d+), demand (\d+), t=(\d+)$"
+)
 CONNECTOR = re.compile(
     r"^(Connector|Large Connector) at (-?\d+),(-?\d+),(-?\d+): mode (\w+), "
     r"buffer (\d+)/(\d+) FE, links \[(.*?)\], pool (\d+)/(\d+), demand (\d+), t=(\d+)$"
@@ -60,6 +67,50 @@ def main() -> int:
             + (0 if output.strip() == "" else output.count("(")),
             "input_links": 0 if input_.strip() == "" else input_.count("("),
             "output_links": 0 if output.strip() == "" else output.count("("),
+            "pool_ready": ready,
+            "pool_next": next_,
+            "demand": demand,
+            "t": ticks,
+        }
+        for name, value in values.items():
+            print(f"{name}={value}")
+        print("ok=1")
+        return 0
+    match = LIGHT.match(line)
+    if match:
+        (
+            x,
+            y,
+            z,
+            mode,
+            lit,
+            timer,
+            period,
+            draw,
+            buffer,
+            capacity,
+            links,
+            ready,
+            next_,
+            demand,
+            ticks,
+        ) = match.groups()
+        # `lit`, not `powered`: a shell function that also used a local named `powered`
+        # once shadowed the relay's parsed field through bash's dynamic scoping.
+        values = {
+            "kind": "light",
+            "large": 0,
+            "x": x,
+            "y": y,
+            "z": z,
+            "mode": mode,
+            "lit": 1 if lit == "true" else 0,
+            "lamp_timer": timer,
+            "lamp_period": period,
+            "draw": draw,
+            "energy": buffer,
+            "capacity": capacity,
+            "links": 0 if links.strip() == "" else links.count("("),
             "pool_ready": ready,
             "pool_next": next_,
             "demand": demand,

@@ -12,14 +12,17 @@ rewrite, see `FINDINGS.md`).
 MIT is licence rank 0 (permissive); the approval is still required.
 
 Status: **slice 1 implemented and delivered as a flat SDK package (mod API 0.2), version
-0.2.4** — the two connectors, wire links and the modular accumulator, with the jar's rates and
+0.2.5** — the two connectors, wire links and the modular accumulator, with the jar's rates and
 connection rules, plus the **redstone relay** that bridges one wire network into another while
-powered, in one `createaddition.hmod` that carries the code *and* the content. (0.2.0
+powered and the **small light connector** whose lamp draws 1 FE a tick and lights while its network
+pays it, in one `createaddition.hmod` that carries the code *and* the content. (0.2.0
 was the migration; 0.2.2 the tower; 0.2.3 the three review fixes, §
 [`## Review fixes — 0.2.3`](#review-fixes--023-pr-1526-2026-11-21); 0.2.4 the relay, §
-[`## Slice 4 — the redstone relay (0.2.4)`](#slice-4--the-redstone-relay-024).) The 0.1.0 `.hnmod` was retired by Horizon's mod-API merge (#16941); the migration is
+[`## Slice 4 — the redstone relay (0.2.4)`](#slice-4--the-redstone-relay-024); 0.2.5 the lamp, §
+[`## Slice 5 — the small light connector (0.2.5)`](#slice-5--the-small-light-connector-025).) The
+0.1.0 `.hnmod` was retired by Horizon's mod-API merge (#16941); the migration is
 [`## Migration to the SDK format`](#migration-to-the-sdk-format), and the 0.1.0 in-game evidence
-stays historical because no launcher exists at this pin (`## Gaps`).
+stays historical (`## Gaps`).
 
 ## Class + tier, approach, licence
 
@@ -214,7 +217,9 @@ The ruling above is about the Java mod; a migration must not carry **our** bugs 
   **consumer** could read a neighbour's published `Speed`/`Capacity`/`Stress`
   with `ENERGY`-style capability reads, but nothing here needs it, and producing
   or joining Create's network is impossible without forking its engine.
-- **`small_light_connector`** (its 1 FE/t lamp consumption).
+- ~~**`small_light_connector`** (its 1 FE/t lamp consumption)~~ — **closed in 0.2.5**: the
+  lamp draws 1 FE a tick from its network, lights after its position-seeded hysteresis and emits
+  block light 15 while lit, § [`## Slice 5`](#slice-5--the-small-light-connector-025).
 - **`creative_energy`**, the e2e's source of last resort: the harness seeds an
   accumulator with `/createaddition energy` instead.
 - **`portable_energy_interface`**, **`energy_meter`**,
@@ -1031,5 +1036,236 @@ ticks, and source + sink + both network pools + the relay's buffer stay at 100,0
 5. **Vertical relays are supported by the state and the port rule, not by the e2e.** The block can be
    placed vertical (and `state_for_placement` does it on a side click), and the port mapping is
    unit-tested; the in-game leg uses a flat relay so the rig is readable.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review
+
+---
+
+## Slice 5 — the small light connector (0.2.5)
+
+### The slice, and the gap lines it comes from
+
+Two lines of this port's own record, both from the jar inventory in `FINDINGS.md`:
+
+> **Gaps**: "**`small_light_connector`** (its 1 FE/t lamp consumption)."
+
+> **Where this port differs** 3: "**`small_light_connector`** (1 FE/t consumption, festive lamp) is a
+> gap."
+
+The 0.2.4 report's next-slice proposal named it explicitly. **Choice.** It is the one remaining
+family in the jar's FE half that is a *rule over the network* rather than another buffer: upstream's
+`SmallLightConnectorBlockEntity.specialTick` pulls 1 FE a tick out of the wire network and lights the
+block at a per-position hysteresis threshold. It needs no Create kinetics, no GUI and no renderer,
+and it is provable in game with a conservation assertion plus the light engine's own answer.
+
+**Tier fit.** `deep`: a block entity with a per-tick network draw, a position-seeded hysteresis
+counter, saved state (`tick_toggle_timer`), a block-state gate (`powered`), a `dynamic_light`
+`light_emission` Part and a carried blockstate/model/texture set — inside the row, no dimension, no
+entity AI.
+
+**Upstream behaviour read** (repo `658a390b…`, analysis only): `SmallLightConnectorBlockEntity`
+(`posTimeOffset = 10 + (abs(x*31 + y*45 + z*33) % 7) * 3`, `getMaxIn/Out` = the small connector's,
+`getNodeCount` = 4, `getMaxWireLength` = 16, `specialTick`: `network.demand(1)`,
+`network.pull(SMALL_LIGHT_CONNECTOR_CONSUMPTION, false) > 0`, the ±1 counter clamped at
+`±posTimeOffset`, and the `POWERED` write at each clamp), `SmallLightConnectorBlock`
+(`POWERED` in the state, `getLightEmission` = 15 when powered), `CommonConfig` (consumption **1**).
+
+### What it does
+
+- **A small connector with a lamp.** `Kind::Light` is `Connector::Small` for every connector rule
+  (1,000 FE/t either way, 16-block wires, 4 nodes, pull/push/none modes, the spool click, its own
+  1,000 FE window as a declared `block_energy`). One block entity type serves it with the other four
+  blocks.
+- **The lamp draws 1 FE a tick from its network.** In the level pass, after the relay step and before
+  the pull connectors, every lamp calls `pool.take(1)` on its network's buffer and adds its 1 to the
+  network's demand (upstream's `demand(1)`), whichever mode it is in — a lamp is a consumer, not a
+  connector. The energy is spent: `source + pool + the lamp's consumption` is constant.
+- **The hysteresis.** `light_clock` runs once per queued lamp per tick: the saved `tick_toggle_timer`
+  rises when the pass paid the lamp and falls when it did not, clamped to
+  `±light_period(pos)`; at `+period` the block's `powered` bit is set, at `-period` cleared, and
+  `LevelRef::check_light` is called so the light engine re-asks. A lamp outside any network still
+  counts down (`specialTick` runs before upstream's mode check).
+- **The light.** The block declares `light: 0` + `dynamic_light: true`, and `LightShape`'s
+  `light_emission` answers 15 when the state matches `powered=true` (with `block_states().matches`),
+  so the answer cannot drift from the bit and reads the same on both sides.
+- **Content.** The jar's own 36-part blockstate (facing × mode × powered; its six parts' girder
+  variants are dropped with the undeclared `variant` property), its six models and the item model,
+  the lit and dark bulb textures, the item definition and declaration, the loot table (26.3 dialect),
+  the harvest-tag entry and the lang key.
+
+### Red → green (TDD)
+
+The rules went in first as stubs (`light_period` returning 10, `light_tick` returning the counter
+unchanged) with their tests, against the pre-slice code. `lamp-red.log`:
+
+```
+thread 'network::tests::a_lamp_lights_after_its_period_of_energy_and_darkens_after_as_long_without' panicked at src/network.rs:3240:5:
+assertion `left == right` failed
+  left: (0, None)
+ right: (1, None)
+thread 'network::tests::a_lamp_on_a_network_with_no_energy_draws_nothing' (126446) panicked at src/network.rs:3301:5:
+assertion `left == right` failed
+  left: (0, None)
+ right: (-1, None)
+thread 'network::tests::a_lamp_that_never_got_energy_goes_dark_and_stays_dark' panicked at src/network.rs:3256:5:
+assertion `left == right` failed
+  left: (0, None)
+ right: (-1, None)
+thread 'network::tests::a_lamps_period_is_its_own_ten_to_twenty_eight_tick_cycle' (126448) panicked at src/network.rs:3221:5:
+assertion `left == right` failed: 2880 % 7 = 3
+  left: 10
+ right: 19
+test result: FAILED. 68 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Green: **72 passed, 0 failed** (`sdk-test.log`) — the six new tests are the lamp's kind/window, the
+position-seeded period (including the absolute seed and the 10..=28 range over a 16×16 grid), both
+hysteresis thresholds with the clamps, a lamp that never got energy, the rig's 1 FE/t conservation,
+and the unlinked lamp that draws nothing. `src/runtime.rs` is untouched
+(`03721ca4…f962`, packed too).
+
+### The 0.2.5 ladder
+
+| Step | Command | Result |
+|---|---|---|
+| tests | `cargo test --offline` | **72 passed**, 0 failed (`sdk-test.log`, regenerated for this version) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| formatting | `cargo fmt --check` | clean (`sdk-fmt.log`) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` | `target/horizon-mod/createaddition.hmod`, exit 0 (`lamp-build-1.log`) |
+| package, second build | same again | **byte-identical** (`cmp`) (`lamp-build-2.log`) |
+| registry check | `cargo horizon-mod check createaddition.hmod` | exit 0 (`lamp-check.log`) |
+| fits, campaign pin | `cargo horizon-mod fits … --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a` | `0a875da  made for`, exit 0 (`lamp-fits-pin.log`) |
+| fits, another build | `… --build 0b14f8ac…` and `… --build 6d765e0e…` | **`does not fit: 1 item changed — the method BlockStates::light_emission (removed)`**, exit 1 (`lamp-fits-other.log`) |
+| data shape | `python3 tools/data_shape.py createaddition.hmod` | 5/5 loot tables in the 26.3 dialect |
+| content carry | `python3 tools/carry_content.py --check` | `assets/ and data/ match the jar carry` |
+| licence notice | `python3 tools/check_licence.py` | `ok … carries the upstream MIT notice verbatim` |
+| package verifier | `python3 ports/tools/verify-sdk-package.py createaddition` | **1/1** |
+
+**The second `fits` run is red on purpose, and that is the finding.** `light_emission` (the hook, the
+`BlockStates` service method and `dynamic_light`) does not exist at `0b14f8a` or at the next nightly
+`6d765e0`: the lamp's light surface is **new at the 0a875da pin**. So the pin run is not a tautology —
+the older builds prove the check discriminates — but no earlier build can carry this family, and a
+future repin must keep `light_emission` (or the package loses the lamp).
+
+Deliverable: **`createaddition.hmod`, 168,353 B, SHA-256
+`854e9d6ac9a8b9af0501310053c8e9c833215694663959501447a15199372b41`**, **108 entries**, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too). 79 `assets/` and 18 `data/` files (was 67 + 16; the lamp adds its
+blockstate, seven models, two textures, its item definition and item model, and two data files).
+
+```
+createaddition 0.2.5 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  168353 bytes, SHA-256 854e9d6ac9a8b9af0501310053c8e9c833215694663959501447a15199372b41, unsigned
+```
+
+```
+Create Crafts & Additions:
+0a875da  made for
+Create Crafts & Additions:
+0b14f8a  does not fit: 1 item changed
+    the method `BlockStates::light_emission` (removed)
+```
+
+The launcher rebuilt the game for this package (`native-0a875da-9e6e38b74abd`, 6 s: the 0.2.4 build
+`native-0a875da-39565764a7f0` was not reused, so the version bump is again what forces a recompile).
+
+### In-game (`e2e-lamp-default.log`, `PASS` + `EXIT:0`; `== J`)
+
+The rig is `accumulator(250) – connector(251, pull) – lamp(254, on a stone wall at 255)` on its own
+stone pad, linked with copper; the player stands on the pad so every read is within reach.
+
+```
+== J: the small light connector lights on its network's one FE a tick ==
+  the lamp at 254,100,0 cycles in 25 ticks (the jar's position-seeded period)
+  Small Light Connector at 254,100,0: mode none, powered false, lamp timer -10/25, draw 1 FE/t, buffer 0/1000 FE, links [], pool 0/0, demand 0, t=1879
+  -- at 0 FE the lamp is dark and its counter sits at the bottom clamp
+  createaddition:small_light_connector[facing=east,mode=none,powered=false], block light 0
+  Small Light Connector at 254,100,0: mode none, powered false, lamp timer -25/25, draw 1 FE/t, buffer 0/1000 FE, links [], pool 0/0, demand 0, t=1919
+  -- seeding 5,000 FE and linking the wire lights it
+  link 251-254 (copper): Nodes linked.
+  createaddition:small_light_connector[facing=east,mode=none,powered=true], block light f
+  Small Light Connector at 254,100,0: mode none, powered true, lamp timer 25/25, draw 1 FE/t, buffer 0/1000 FE, links [(251,100,0)/0/copper], pool 0/0, demand 0, t=1998
+  -- it draws exactly one FE a tick, and the network's pool holds
+  Modular Accumulator at 250,100,0: 4903/2000000 FE (t=2005)
+  Connector at 251,100,0: mode pull, buffer 0/1000 FE, links [(254,100,0)/0/copper], pool 6/20, demand 1, t=2012
+  Connector at 251,100,0: mode pull, buffer 0/1000 FE, links [(254,100,0)/0/copper], pool 6/20, demand 1, t=2040
+  Modular Accumulator at 250,100,0: 4861/2000000 FE (t=2047)
+  createaddition:small_light_connector[facing=east,mode=none,powered=true], block light f
+  source 4903->4861 over 42 ticks: 42 FE, one a tick, pool steady at 26
+  -- CONTROL: unlinked, the lamp draws nothing and the source does not move
+  unlink 251-254: Wire removed.
+  Modular Accumulator at 250,100,0: 4852/2000000 FE (t=2063)
+  createaddition:small_light_connector[facing=east,mode=none,powered=false], block light 0
+  Modular Accumulator at 250,100,0: 4852/2000000 FE (t=2127)
+  unlinked: the lamp went dark and the source stayed at 4852 FE
+```
+
+Why these can fail: at 0 FE, a lit lamp would fail `powered=false`/`light 0`; the seed leg's
+`block light f` is the light engine's answer, not the mod's readout; `42 FE over 42 ticks` is exact
+(one unit of the source per tick with the pool held at 26 — a 2 FE/t or 0 FE/t draw fails it); and
+the counter's readout (`-25/25` then `25/25`) is the hysteresis itself. `LAMP_SELFTEST=1`
+(`e2e-lamp-gate-selftest.log`) flips the unlinked assertion and trips; `SELFTEST=1`
+(`e2e-lamp-selftest.log`) flips B's conservation; the package-less control
+(`e2e-lamp-control.log`) fails at the first item assertion.
+
+**Correction to the brief's expected numbers.** The brief asked for `powered=false` at 0 FE after
+`posTimeOffset+5` ticks and `powered=true` after the *same* wait once seeded. The first half holds
+(the counter starts at 0 and reaches `-period` in `period` ticks). The second does not: upstream
+clamps the counter at `±posTimeOffset`, so a lamp that has run dark sits at `-period` and needs
+**`2 * period`** ticks of energy to reach `+period`. The leg therefore waits `2 * period + 5` and
+records why. The same is true of the unlink leg: from `+period` it needs `2 * period` ticks to go
+dark. This is upstream's own hysteresis, not a port choice.
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-lamp-default.log` | `PASS` + `EXIT:0` | A–I unchanged (the relay still carries 25,020 FE with the total conserved), plus **J**: dark at 0 FE (`light 0`), lit after its hysteresis (`powered=true`, `light f`), exactly 1 FE/t over 42 ticks with the pool steady, and the unlinked differential (dark, source unchanged) |
+| `e2e-lamp-selftest.log` | `FAIL` + `EXIT:1` | `SELFTEST: the conservation assertion did not trip` (B's counterfactual) |
+| `e2e-lamp-gate-selftest.log` | `FAIL` + `EXIT:1` | `LAMP_SELFTEST: the unlinked lamp drew nothing, so the assertion is alive` (J's own counterfactual) |
+| `e2e-lamp-control.log` | `FAIL` + `EXIT:1` | the package-less game has neither the accumulator item nor the lamp block id (and refuses `createaddition:redstone_relay` and `createaddition:small_light_connector` by name) |
+
+`python3 ports/tools/check-e2e-logs.py createaddition createaddition-e2e --strict`:
+**logs=20 ok=20 missing-exit=0 bad-exit=0**.
+
+### Harness facts this slice produced
+
+1. **`ctl messages` is newest-first, so a failure dump must print `head`, not `tail`.** The first
+   run's final read timed out and the diagnostic printed the *oldest* 15 of the 60-line window,
+   hiding the answer. `fail()` now prints `chat | head -20`.
+2. **A chat line can be lost.** The same `info` command succeeded 55 ticks earlier and then got no
+   reply at all, so `command_reply` now re-sends the *same tagged line* once before failing. The
+   assertion is unchanged: only a matching reply ends the wait.
+3. **`ctl light X Y Z X Y Z` answers one hex digit** (`.`block`, `f` = 15), which is how the lamp's
+   light is read from the light engine rather than from the mod's readout.
+
+### Coverage added by this slice
+
+| family | status |
+|---|---|
+| the lamp is a full small connector (rates, nodes, reach, modes, its 1,000 FE window) | **tested** — `the_light_connector_is_a_small_connector_with_a_lamp`; in game its mode settled to `none` on stone and the copper wire linked |
+| the position-seeded hysteresis period | **tested** — `a_lamps_period_is_its_own_ten_to_twenty_eight_tick_cycle`; in game `lamp timer 25/25` at 254,100,0 |
+| the counter and both clamps | **tested** — `a_lamp_lights_after_its_period_of_energy_and_darkens_after_as_long_without`, `a_lamp_that_never_got_energy_goes_dark_and_stays_dark`; in game `-25/25` → `25/25` → dark |
+| the 1 FE/t network draw, conserved | **tested** — `the_lamp_rig_draws_one_fe_a_tick_and_conserves_it`; in game `42 FE over 42 ticks`, pool steady at 26 |
+| the `powered` bit and block light 15 / 0 | **tested** — in game `ctl block` `powered=true` + `ctl light` `f`, then `powered=false` + `0` |
+| an unlinked lamp draws nothing | **tested** — `a_lamp_on_a_network_with_no_energy_draws_nothing`; in game the source stayed at 4,852 over 66 ticks, plus `LAMP_SELFTEST` |
+| the lamp's loot table | **tested** — H now breaks all five blocks (`small_light_connector: broke and dropped 1`) |
+| the lamp's recipe | **not ported** — it needs `c:wires/iron` and `createaddition:connector`, and the iron wire is not carried (`CONTENT.md`) |
+| a lamp's own `pull`/`push` mode feeding the wire | unit-tested as the connector rules; not exercised in game (the e2e's lamp is mounted on stone and idle, which is the readout's `mode none`) |
+
+### Deviations of this slice (declared)
+
+1. **The lamp's draw is booked in the network pass, not in its own tick.** Upstream pulls from the
+   in-memory `EnergyNetwork` inside `specialTick`; this port's pass already owns the network's buffer,
+   so the draw is one `pool.take(1)` in the same transaction as the moves, and the lamp's counter is
+   updated from the result. The order (after the relay, before the pulls) is what gives the steady
+   state the jar's numbers do: the lamp spends 1, the pull connector fills exactly that back.
+2. **The counter is saved every tick it changes.** Upstream keeps `tick_toggle_timer` in memory and
+   writes it in `writeSafe`; here it is the block entity's saved compound, so a reload keeps the
+   hysteresis instead of restarting it. The write only happens when the clamped counter moves.
+3. **The `powered` bit is written one tick later than upstream's counter clamp**, in the pass, as the
+   relay's bit already is; the bit is the game's own state, so `ctl block`, the models and the light
+   engine all read it.
+4. **`dynamic_light` instead of a per-state emission.** The content schema has no per-state light, so
+   the block declares `dynamic_light: true` and `LightShape::light_emission` answers from the state.
+   That hook is new at this pin (see the `fits` finding above).
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review

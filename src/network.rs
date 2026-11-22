@@ -34,6 +34,8 @@ pub(crate) const CONNECTOR: &str = "createaddition:connector";
 pub(crate) const LARGE_CONNECTOR: &str = "createaddition:large_connector";
 /// The modular accumulator block.
 pub(crate) const ACCUMULATOR: &str = "createaddition:modular_accumulator";
+/// The redstone relay: a redstone-gated bridge between two wire networks.
+pub(crate) const RELAY: &str = "createaddition:redstone_relay";
 /// The empty spool: right-clicking a linked connector with it takes the wire out.
 const SPOOL: &str = "createaddition:spool";
 /// The three wire spools, each naming the wire it lays.
@@ -50,6 +52,16 @@ const CHARGE: &str = "energy";
 const FACING: &str = "facing";
 /// The block property its mode is shown in (`none`/`pull`/`push`).
 const MODE: &str = "mode";
+/// The relay's `powered` state bit, which gates its bridge (`RedstoneRelayBlock.POWERED`).
+const POWERED: &str = "powered";
+/// The relay's `vertical` state bit: a relay clicked onto a side is a vertical one.
+const VERTICAL: &str = "vertical";
+/// A relay has eight wire nodes: 0–3 the input port, 4–7 the output port
+/// (`RedstoneRelayBlockEntity.NODE_COUNT` / `WireNodeKind::portOf`).
+const RELAY_NODES: usize = 8;
+/// The relay bridges at the small connector's rate, the wire kind it connects
+/// (`WireNodeKind.RELAY` reports `ConnectorType.Small`).
+const RELAY_TRANSFER: i32 = 1_000;
 /// One network's saved buffer, in its controller's compound (0.1.0's keys, kept).
 const NET_READY: &str = "netReady";
 const NET_NEXT: &str = "netNext";
@@ -67,7 +79,7 @@ const TOWER_SAVED_Z: &str = "tz";
 /// A block position.
 pub(crate) type Pos = [i32; 3];
 
-/// The three blocks this port owns, each with the energy buffer it declares.
+/// The four blocks this port owns, and the energy buffer each declares (the relay declares none).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
   /// `createaddition:connector`: 1,000 FE/t either way, a 1,000 FE window.
@@ -76,6 +88,10 @@ pub(crate) enum Kind {
   Large,
   /// `createaddition:modular_accumulator`: 2,000,000 FE, 5,000 FE/t either way.
   Accumulator,
+  /// `createaddition:redstone_relay`: an eight-node bridge from its input wire network to
+  /// its output one while powered. Its 1,000 FE is the in-flight buffer, not a declared
+  /// capability: upstream's relay exposes no energy storage.
+  Relay,
 }
 
 impl Kind {
@@ -84,7 +100,7 @@ impl Kind {
     match self {
       Self::Small => Some(Connector::Small),
       Self::Large => Some(Connector::Large),
-      Self::Accumulator => None,
+      Self::Accumulator | Self::Relay => None,
     }
   }
 
@@ -94,11 +110,14 @@ impl Kind {
       Self::Small => "Connector",
       Self::Large => "Large Connector",
       Self::Accumulator => "Modular Accumulator",
+      Self::Relay => "Redstone Relay",
     }
   }
 
   /// The energy buffer the block declares (`Registrar::block_energy`): upstream's window for
-  /// the two connectors and the accumulator's own capacity, reachable from every side.
+  /// the two connectors and the accumulator's own capacity, reachable from every side. The
+  /// relay declares none — its 1,000 FE is the bridge's in-flight buffer — so this only sizes
+  /// its readout and the admin `energy` command.
   pub(crate) fn buffer(self) -> ModEnergyBuffer {
     let (capacity, max_insert, max_extract) = match self.connector() {
       Some(connector) => (
@@ -106,6 +125,7 @@ impl Kind {
         connector.max_in(),
         connector.max_out(),
       ),
+      None if self == Self::Relay => (RELAY_TRANSFER, RELAY_TRANSFER, RELAY_TRANSFER),
       None => (
         ACCUMULATOR_CAPACITY,
         ACCUMULATOR_TRANSFER,
@@ -125,14 +145,113 @@ impl Kind {
   fn capacity(self) -> i32 {
     self.buffer().capacity
   }
+
+  /// The block as a wire node, for the four blocks that take wires; the accumulator is
+  /// not one.
+  fn wire_node(self) -> Option<WireNode> {
+    match self {
+      Self::Small => Some(WireNode::Connector(Connector::Small)),
+      Self::Large => Some(WireNode::Connector(Connector::Large)),
+      Self::Relay => Some(WireNode::Relay),
+      Self::Accumulator => None,
+    }
+  }
 }
 
-/// The registry keys this port resolves once per pass: the three blocks and the four spools.
+/// A block that takes wires: the two connectors and the redstone relay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WireNode {
+  /// A connector, with its own node count and wire length.
+  Connector(Connector),
+  /// The relay: eight nodes in two ports, small-connector reach and rate.
+  Relay,
+}
+
+impl WireNode {
+  /// How many nodes the block has.
+  fn nodes(self) -> usize {
+    match self {
+      Self::Connector(connector) => connector.nodes(),
+      Self::Relay => RELAY_NODES,
+    }
+  }
+
+  /// The connector whose rate and reach the link rules use; the relay is a small one.
+  fn connector(self) -> Connector {
+    match self {
+      Self::Connector(connector) => connector,
+      Self::Relay => Connector::Small,
+    }
+  }
+}
+
+/// One of a relay's two ports: nodes 0–3 take energy in, nodes 4–7 give it out
+/// (`WireNodeKind::portOf`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RelayPort {
+  /// The input port, nodes 0–3.
+  Input,
+  /// The output port, nodes 4–7.
+  Output,
+}
+
+impl RelayPort {
+  /// The port's number, as upstream's `portOf` has it.
+  const fn index(self) -> u8 {
+    match self {
+      Self::Input => 0,
+      Self::Output => 1,
+    }
+  }
+
+  /// The port a relay node belongs to.
+  const fn of_node(node: i32) -> Self {
+    if node < 4 { Self::Input } else { Self::Output }
+  }
+}
+
+/// One port of one wire block: a connector has only port 0, a relay has 0 (input) and
+/// 1 (output). Two ports are separate networks even when one relay joins them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PortMember {
+  /// The block's position.
+  pos: Pos,
+  /// The port number (`RelayPort::index`; connectors are 0).
+  port: u8,
+}
+
+impl PortMember {
+  /// A connector's single port.
+  const fn connector(pos: Pos) -> Self {
+    Self { pos, port: 0 }
+  }
+
+  /// A relay's input or output port.
+  const fn relay(pos: Pos, port: RelayPort) -> Self {
+    Self {
+      pos,
+      port: port.index(),
+    }
+  }
+}
+
+/// What one tick of a relay's bridge does: how much it takes out of its input network's
+/// pool into its own buffer, and how much it gives its output network's pool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RelayMove {
+  /// Energy taken from the input pool into the relay's buffer.
+  into: i32,
+  /// Energy put from the relay's buffer into the output pool.
+  out: i32,
+}
+
+/// The registry keys this port resolves once per pass: the four blocks and the four spools.
 #[derive(Clone, Copy)]
 struct Keys {
   small: BlockKey,
   large: BlockKey,
   accumulator: BlockKey,
+  relay: BlockKey,
   spool: ItemKey,
   copper: ItemKey,
   gold: ItemKey,
@@ -150,6 +269,7 @@ impl Keys {
       small: host.block_key(CONNECTOR)?,
       large: host.block_key(LARGE_CONNECTOR)?,
       accumulator: host.block_key(ACCUMULATOR)?,
+      relay: host.block_key(RELAY)?,
       spool: item(SPOOL)?,
       copper: item(COPPER_SPOOL)?,
       gold: item(GOLD_SPOOL)?,
@@ -157,7 +277,7 @@ impl Keys {
     })
   }
 
-  /// Which of the three blocks `block` is.
+  /// Which of the four blocks `block` is.
   fn kind(self, block: BlockKey) -> Option<Kind> {
     if block == self.small {
       Some(Kind::Small)
@@ -165,6 +285,8 @@ impl Keys {
       Some(Kind::Large)
     } else if block == self.accumulator {
       Some(Kind::Accumulator)
+    } else if block == self.relay {
+      Some(Kind::Relay)
     } else {
       None
     }
@@ -266,10 +388,22 @@ fn store_wires(nbt: &mut Compound, wires: &[SavedWire]) {
   );
 }
 
-/// The first node of a connector that has no wire in it.
-fn free_node(nbt: &Compound, connector: Connector) -> Option<i32> {
+/// The first node of a wire block that has no wire in it.
+fn free_node(nbt: &Compound, node: WireNode) -> Option<i32> {
   let used: BTreeSet<i32> = saved_wires(nbt).iter().map(|wire| wire.node).collect();
-  (0..i32::try_from(connector.nodes()).ok()?).find(|node| !used.contains(node))
+  (0..i32::try_from(node.nodes()).ok()?).find(|node| !used.contains(node))
+}
+
+/// The first free node of one relay port, or `None` when that port's four are taken. A
+/// relay's port is not interchangeable: a wire in 0–3 feeds the bridge, one in 4–7 leaves
+/// it, so a full input port must refuse the wire rather than silently use the output.
+fn relay_free_node(nbt: &Compound, port: RelayPort) -> Option<i32> {
+  let used: BTreeSet<i32> = saved_wires(nbt).iter().map(|wire| wire.node).collect();
+  let (first, end) = match port {
+    RelayPort::Input => (0, 4),
+    RelayPort::Output => (4, 8),
+  };
+  (first..end).find(|node| !used.contains(node))
 }
 
 /// What a block of ours holds at `pos`: its kind and its saved compound.
@@ -285,25 +419,6 @@ fn saved_at(host: &dyn Host, level: LevelRef, keys: Keys, pos: Pos) -> Option<Sa
   let kind = keys.kind(level.block(host, pos)?)?;
   let nbt = host.block_entity(level, pos)?.data(host)?;
   Some(Saved { kind, nbt })
-}
-
-/// What a connector knows at the start of a pass.
-#[derive(Clone, Debug)]
-struct Node {
-  pos: Pos,
-  connector: Connector,
-  mode: Mode,
-  wires: Vec<SavedWire>,
-}
-
-fn node_at(host: &dyn Host, level: LevelRef, keys: Keys, pos: Pos) -> Option<Node> {
-  let saved = saved_at(host, level, keys, pos)?;
-  Some(Node {
-    pos,
-    connector: saved.kind.connector()?,
-    mode: mode_saved(&saved.nbt).unwrap_or(Mode::None),
-    wires: saved_wires(&saved.nbt),
-  })
 }
 
 // --- geometry -------------------------------------------------------------
@@ -336,6 +451,91 @@ fn face_name(face: Direction) -> &'static str {
     Direction::West => "west",
     Direction::East => "east",
   }
+}
+
+/// The horizontal direction 90° clockwise of `face`, as `Direction.getClockWise` has it
+/// (north → east → south → west).
+fn clockwise(face: Direction) -> Direction {
+  match face {
+    Direction::North => Direction::East,
+    Direction::East => Direction::South,
+    Direction::South => Direction::West,
+    Direction::West => Direction::North,
+    _ => face,
+  }
+}
+
+/// The horizontal direction 90° counter-clockwise of `face` (north → west → south → east).
+fn counter_clockwise(face: Direction) -> Direction {
+  match face {
+    Direction::North => Direction::West,
+    Direction::West => Direction::South,
+    Direction::South => Direction::East,
+    Direction::East => Direction::North,
+    _ => face,
+  }
+}
+
+/// The horizontal direction a placer's yaw looks along, as `Direction.fromYRot` reads it:
+/// 0° is south, 90° west, 180° north, 270° east.
+fn yaw_facing(yaw: f32) -> Direction {
+  match i32::try_from(((yaw.rem_euclid(360.0) + 45.0) / 90.0) as i64).unwrap_or(0) % 4 {
+    0 => Direction::South,
+    1 => Direction::West,
+    2 => Direction::North,
+    _ => Direction::East,
+  }
+}
+
+/// The relay port a peer at `peer` sits on, as upstream's `getAvailableNode` picks the half
+/// of the relay the click was in. A horizontal relay gives on the side its `facing` points
+/// to (its output nodes' anchors are there) and takes on the opposite one; a vertical relay
+/// has the two halves the other way round, as `getNodeOffset` and `getAvailableNode` have
+/// them.
+fn relay_port_for_peer(facing: Direction, vertical: bool, relay: Pos, peer: Pos) -> RelayPort {
+  let [dx, _, dz] = [peer[0] - relay[0], peer[1] - relay[1], peer[2] - relay[2]];
+  let [nx, _, nz] = facing.normal();
+  let towards_facing = dx * nx + dz * nz > 0;
+  match (vertical, towards_facing) {
+    (false, true) => RelayPort::Output,
+    (false, false) => RelayPort::Input,
+    (true, true) => RelayPort::Input,
+    (true, false) => RelayPort::Output,
+  }
+}
+
+/// The two sides a relay reads redstone from (`calculateInputStrength`): above and below
+/// when vertical, the two sides across its long axis when horizontal. A redstone block or
+/// wire on either side powers it; the connectors' own axis does not.
+fn relay_sides(facing: Direction, vertical: bool) -> [Direction; 2] {
+  if vertical {
+    [Direction::Up, Direction::Down]
+  } else {
+    [clockwise(facing), counter_clockwise(facing)]
+  }
+}
+
+/// Whether the two sides' signals power the relay: any signal at all does
+/// (`shouldBePowered`: strength > 0).
+fn relay_power_from(strengths: [i32; 2]) -> bool {
+  strengths.into_iter().max().unwrap_or(0) > 0
+}
+
+/// One tick of the relay's bridge, as `WireGraph.tickBridges` does it: nothing while
+/// unpowered; otherwise the in-flight buffer is topped up from the input pool and then
+/// given to the output pool, at most 1,000 FE a tick either way. The buffer holds at most
+/// one tick's transfer, so energy can wait there but never exceed the wire's rate.
+fn relay_bridge(powered: bool, buffer: i32, input_ready: i32, output_room: i32) -> RelayMove {
+  if !powered {
+    return RelayMove::default();
+  }
+  let buffer = buffer.clamp(0, RELAY_TRANSFER);
+  let into = (RELAY_TRANSFER - buffer)
+    .min(input_ready)
+    .clamp(0, RELAY_TRANSFER);
+  let held = buffer + into;
+  let out = held.min(output_room).clamp(0, RELAY_TRANSFER);
+  RelayMove { into, out }
 }
 
 /// The block a connector is mounted on, and the side of that block which faces the connector.
@@ -374,7 +574,7 @@ impl Queue {
   }
 }
 
-/// The one block entity type of the three blocks: it makes them tick, and its tick only queues
+/// The one block entity type of the four blocks: it makes them tick, and its tick only queues
 /// the position for the level's pass.
 pub(crate) struct Ticker {
   queue: Arc<Mutex<Queue>>,
@@ -434,68 +634,114 @@ impl BlockPart for ConnectorShape {
     host: &mut dyn ServerHost,
     event: &mut UseItemOnEvent<'_>,
   ) -> Option<InteractionResult> {
-    let click = event.click;
-    let stack = click.stack?;
-    let keys = Keys::resolve(host)?;
-    let player = host.players().acting_player()?;
-    let level = player.level(host)?;
-    let place = ItemPlace::PlayerHand {
-      player: click.player,
-      hand: click.hand,
-    };
-    if keys.is_empty_spool(stack.item()) {
-      remove_wires(host, level, keys, click.pos);
-      return Some(InteractionResult::Success);
-    }
-    let wire = keys.wire(stack.item())?;
-    let target = saved_at(host, level, keys, click.pos)?;
-    let target_connector = target.kind.connector()?;
-    let Some(first) = pending_of(stack) else {
-      // The first click: remember the connector and the node it offers.
-      let Some(node) = free_node(&target.nbt, target_connector) else {
-        feedback(host, refusal_text(Refusal::NodesFull));
-        return Some(InteractionResult::Success);
-      };
-      offer(host, &place, Some((click.pos, node)));
-      feedback(host, "Wire connector selected.");
-      return Some(InteractionResult::Success);
-    };
-    let (from, selected_node) = first;
-    offer(host, &place, None);
-    if from == click.pos {
-      return Some(InteractionResult::Success);
-    }
-    // The first connector may have gone since the first click: the click is still ours (0.1.0
-    // claimed it before reading anything), but there is nothing left to link to.
-    let Some(from_saved) = saved_at(host, level, keys, from) else {
-      return Some(InteractionResult::Success);
-    };
-    let Some(from_connector) = from_saved.kind.connector() else {
-      return Some(InteractionResult::Success);
-    };
-    // The node the first click selected, unless another wire took it since.
-    let from_node = free_node(&from_saved.nbt, from_connector).unwrap_or(selected_node);
-    let proposal = Proposal {
-      a: from,
-      from: from_connector,
-      b: click.pos,
-      to: target_connector,
-      wire,
-    };
-    match proposal.check(host, level, keys) {
-      Link::Refused(reason) => feedback(host, refusal_text(reason)),
-      Link::Linked => {
-        if !proposal.store(host, level, keys, from_node) {
-          feedback(host, "The wire could not be saved.");
-          return Some(InteractionResult::Success);
-        }
-        let use_up = spool_after_link(place.amount(host), player.is_creative(host) == Some(true));
-        spend_spool(host, keys, &place, use_up);
-        feedback(host, "Nodes linked.");
-      }
-    }
-    Some(InteractionResult::Success)
+    spool_click(host, event)
   }
+}
+
+/// The relay's Part: where a placed one sits, and what a spool does with it. A relay takes
+/// wires exactly as a connector does; only its two ports differ, and the link chooses one.
+pub(crate) struct RelayShape;
+
+#[mod_api::horizon_part]
+impl BlockPart for RelayShape {
+  /// A relay clicked on the floor lies flat along the placer's view (as upstream rotates the
+  /// horizontal direction clockwise); one clicked onto a side stands vertical against the
+  /// face it was placed on (`getStateForPlacement`).
+  fn state_for_placement(
+    &self,
+    level: &dyn mod_api::LevelHost,
+    event: &mut StateForPlacementEvent<'_>,
+  ) -> Option<Option<mod_api::BlockState>> {
+    let face = event.context.face;
+    let (vertical, facing) = if face == Direction::Up || face == Direction::Down {
+      (false, clockwise(yaw_facing(event.context.yaw)))
+    } else {
+      (true, face.opposite())
+    };
+    let placed = level.state_with_property(
+      event.state,
+      VERTICAL,
+      if vertical { "true" } else { "false" },
+    )?;
+    let placed = level.state_with_property(placed, FACING, face_name(facing))?;
+    Some(Some(placed))
+  }
+
+  /// A wire spool clicks a relay exactly as it clicks a connector.
+  fn use_item_on(
+    &self,
+    host: &mut dyn ServerHost,
+    event: &mut UseItemOnEvent<'_>,
+  ) -> Option<InteractionResult> {
+    spool_click(host, event)
+  }
+}
+
+/// The spool click both wire parts share: the empty spool takes the clicked block's wires
+/// out, a wire spool's first click selects it and its second lays the wire.
+fn spool_click(
+  host: &mut dyn ServerHost,
+  event: &mut UseItemOnEvent<'_>,
+) -> Option<InteractionResult> {
+  let click = event.click;
+  let stack = click.stack?;
+  let keys = Keys::resolve(host)?;
+  let player = host.players().acting_player()?;
+  let level = player.level(host)?;
+  let place = ItemPlace::PlayerHand {
+    player: click.player,
+    hand: click.hand,
+  };
+  if keys.is_empty_spool(stack.item()) {
+    remove_wires(host, level, keys, click.pos);
+    return Some(InteractionResult::Success);
+  }
+  let wire = keys.wire(stack.item())?;
+  let target = saved_at(host, level, keys, click.pos)?;
+  let target_node = target.kind.wire_node()?;
+  let Some(first) = pending_of(stack) else {
+    // The first click: remember the block and the node it offers.
+    let Some(node) = free_node(&target.nbt, target_node) else {
+      feedback(host, refusal_text(Refusal::NodesFull));
+      return Some(InteractionResult::Success);
+    };
+    offer(host, &place, Some((click.pos, node)));
+    feedback(host, "Wire connector selected.");
+    return Some(InteractionResult::Success);
+  };
+  let (from, _selected_node) = first;
+  offer(host, &place, None);
+  if from == click.pos {
+    return Some(InteractionResult::Success);
+  }
+  // The first block may have gone since the first click: the click is still ours (0.1.0
+  // claimed it before reading anything), but there is nothing left to link to.
+  let Some(from_saved) = saved_at(host, level, keys, from) else {
+    return Some(InteractionResult::Success);
+  };
+  let Some(from_node) = from_saved.kind.wire_node() else {
+    return Some(InteractionResult::Success);
+  };
+  let proposal = Proposal {
+    a: from,
+    from: from_node,
+    b: click.pos,
+    to: target_node,
+    wire,
+  };
+  match proposal.check(host, level, keys) {
+    Link::Refused(reason) => feedback(host, refusal_text(reason)),
+    Link::Linked => {
+      if !proposal.store(host, level, keys) {
+        feedback(host, "The wire could not be saved.");
+        return Some(InteractionResult::Success);
+      }
+      let use_up = spool_after_link(place.amount(host), player.is_creative(host) == Some(true));
+      spend_spool(host, keys, &place, use_up);
+      feedback(host, "Nodes linked.");
+    }
+  }
+  Some(InteractionResult::Success)
 }
 
 /// What one laid wire does to the held spool stack.
@@ -632,34 +878,61 @@ fn refusal_text(refusal: Refusal) -> &'static str {
   }
 }
 
-/// A wire a click or a command proposes between two connectors.
+/// A wire a click or a command proposes between two wire nodes.
 #[derive(Clone, Copy, Debug)]
 struct Proposal {
   a: Pos,
-  from: Connector,
+  from: WireNode,
   b: Pos,
-  to: Connector,
+  to: WireNode,
   wire: Wire,
 }
 
 impl Proposal {
+  /// The node a wire's `at` end goes in. A connector takes its first free node; a relay's
+  /// port is decided by where the other end stands (its input or output half), and that
+  /// port must still have a free node.
+  fn node_for(
+    self,
+    host: &dyn Host,
+    level: LevelRef,
+    keys: Keys,
+    at: Pos,
+    node: WireNode,
+    peer: Pos,
+  ) -> Option<i32> {
+    let saved = saved_at(host, level, keys, at)?;
+    match node {
+      WireNode::Relay => {
+        let facing = level
+          .block_property(host, at, FACING)
+          .and_then(|name| face_named(&name))
+          .unwrap_or(Direction::North);
+        let vertical = level.block_property(host, at, VERTICAL).as_deref() == Some("true");
+        let port = relay_port_for_peer(facing, vertical, at, peer);
+        relay_free_node(&saved.nbt, port)
+      }
+      WireNode::Connector(_) => free_node(&saved.nbt, node),
+    }
+  }
+
   /// The rule check the spool and the command share: do both ends accept this wire?
   fn check(self, host: &dyn Host, level: LevelRef, keys: Keys) -> Link {
     let at = |pos: Pos| saved_at(host, level, keys, pos);
     let from_wires = at(self.a).map_or_else(Vec::new, |saved| saved_wires(&saved.nbt));
     let to_wires = at(self.b).map_or_else(Vec::new, |saved| saved_wires(&saved.nbt));
-    let free_from = at(self.a).and_then(|saved| free_node(&saved.nbt, self.from));
-    let free_to = at(self.b).and_then(|saved| free_node(&saved.nbt, self.to));
+    let free_from = self.node_for(host, level, keys, self.a, self.from, self.b);
+    let free_to = self.node_for(host, level, keys, self.b, self.to, self.a);
     plan_link(
       End {
         pos: self.a,
-        connector: self.from,
+        connector: self.from.connector(),
         has_free_node: free_from.is_some(),
         linked_to_other: from_wires.iter().any(|saved| saved.pos == self.b),
       },
       End {
         pos: self.b,
-        connector: self.to,
+        connector: self.to.connector(),
         has_free_node: free_to.is_some(),
         linked_to_other: to_wires.iter().any(|saved| saved.pos == self.a),
       },
@@ -667,19 +940,19 @@ impl Proposal {
     )
   }
 
-  /// Lay the wire in both connectors' saved compounds; answers whether both ends took it.
-  /// `node` is the node `a`'s end goes in.
-  fn store(self, host: &mut dyn ServerHost, level: LevelRef, keys: Keys, node: i32) -> bool {
-    let Some(to_node) =
-      saved_at(host, level, keys, self.b).and_then(|saved| free_node(&saved.nbt, self.to))
-    else {
+  /// Lay the wire in both blocks' saved compounds; answers whether both ends took it.
+  fn store(self, host: &mut dyn ServerHost, level: LevelRef, keys: Keys) -> bool {
+    let Some(from_node) = self.node_for(host, level, keys, self.a, self.from, self.b) else {
+      return false;
+    };
+    let Some(to_node) = self.node_for(host, level, keys, self.b, self.to, self.a) else {
       return false;
     };
     let mut left =
       saved_at(host, level, keys, self.a).map_or_else(Vec::new, |saved| saved_wires(&saved.nbt));
     left.push(SavedWire {
       pos: self.b,
-      node,
+      node: from_node,
       wire: self.wire,
     });
     let mut right =
@@ -726,7 +999,7 @@ fn remove_wires(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, pos: Pos
   let Some(saved) = saved_at(host, level, keys, pos) else {
     return;
   };
-  if saved.kind.connector().is_none() {
+  if saved.kind.wire_node().is_none() {
     return;
   }
   let wires = saved_wires(&saved.nbt);
@@ -857,6 +1130,9 @@ pub(crate) fn level_ticked(host: &mut dyn ServerHost, level: LevelRef, queued: &
     if saved.kind.connector().is_some() {
       settle(host, level, keys, *pos);
     }
+    if saved.kind == Kind::Relay {
+      update_relay(host, level, *pos);
+    }
   }
   // Form the accumulators into towers before anything reads them: the pass's own reads, the
   // blocks' output sides and the energy capability all answer for the tower.
@@ -873,20 +1149,62 @@ pub(crate) fn level_ticked(host: &mut dyn ServerHost, level: LevelRef, queued: &
       accumulator_output(host, level, *pos, tower.role(*pos));
     }
   }
-  let nodes: Vec<Node> = blocks
+  let nodes: Vec<(PortMember, Vec<SavedWire>)> = blocks
     .iter()
-    .filter_map(|(pos, _)| node_at(host, level, keys, *pos))
+    .flat_map(|(pos, saved)| ports_of(*pos, saved))
     .collect();
   if nodes.len() < 2 {
     return;
   }
-  let positions: Vec<Pos> = nodes.iter().map(|node| node.pos).collect();
-  let wires: Vec<Vec<SavedWire>> = nodes.iter().map(|node| node.wires.clone()).collect();
-  for members in groups(&positions, &wires) {
-    if members.len() >= 2 {
-      run_network(host, level, keys, &members);
+  let mut nodes = nodes;
+  nodes.sort_by_key(|(member, _)| *member);
+  let members: Vec<PortMember> = nodes.iter().map(|(member, _)| *member).collect();
+  let wires: Vec<Vec<SavedWire>> = nodes.iter().map(|(_, wires)| wires.clone()).collect();
+  for group in net_groups(&members, &wires) {
+    if group.len() >= 2 {
+      run_network(host, level, keys, &group);
     }
   }
+}
+
+/// Read the relay's two redstone sides and keep its `powered` bit in step, as
+/// `RedstoneRelayBlock.updateState`'s scheduled tick does: any signal on a side powers the
+/// bridge, none unpowered it. The bit is the block's own state, so `ctl block` reads it.
+fn update_relay(host: &mut dyn ServerHost, level: LevelRef, pos: Pos) {
+  let facing = level
+    .block_property(host, pos, FACING)
+    .and_then(|name| face_named(&name))
+    .unwrap_or(Direction::North);
+  let vertical = level.block_property(host, pos, VERTICAL).as_deref() == Some("true");
+  let powered = relay_powered(host, level, pos, facing, vertical);
+  let wanted = if powered { "true" } else { "false" };
+  if level.block_property(host, pos, POWERED).as_deref() != Some(wanted) {
+    let _ = host.set_block_property(pos, POWERED, wanted);
+  }
+}
+
+/// The signal the relay's two sides give it (`calculateInputStrength`): the neighbour's
+/// signal towards the relay, and — on the horizontal sides — the strong power as well.
+fn relay_powered(
+  host: &dyn Host,
+  level: LevelRef,
+  pos: Pos,
+  facing: Direction,
+  vertical: bool,
+) -> bool {
+  let mut strengths = [0; 2];
+  for (slot, side) in relay_sides(facing, vertical).into_iter().enumerate() {
+    let neighbour = offset(pos, side);
+    let towards = side.opposite();
+    let signal = level.signal(host, neighbour, towards).unwrap_or(0);
+    let direct = if vertical {
+      0
+    } else {
+      level.direct_signal(host, neighbour, towards).unwrap_or(0)
+    };
+    strengths[slot] = signal.max(direct);
+  }
+  relay_power_from(strengths)
 }
 
 /// Give a connector its placement mode on the first pass after it is placed, as upstream's
@@ -923,6 +1241,7 @@ fn settle(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, pos: Pos) {
 /// settles to pull, push or neither.
 fn mounted_mode(ours: Option<Kind>, foreign: bool, side: Direction) -> Mode {
   match ours {
+    Some(Kind::Relay) => Mode::None,
     Some(kind) => {
       let buffer = kind.buffer();
       let face = side as usize;
@@ -1449,15 +1768,30 @@ fn drain_tower(charges: &mut [(Pos, i32)], amount: i32) -> i32 {
   taken
 }
 
-/// The connector groups of one pass, each a list of positions in the order they were given. Two
-/// connectors share a group when a wire joins them, directly or through others.
-fn groups(positions: &[Pos], wires: &[Vec<SavedWire>]) -> Vec<Vec<Pos>> {
-  let index: BTreeMap<Pos, usize> = positions
-    .iter()
-    .enumerate()
-    .map(|(at, pos)| (*pos, at))
-    .collect();
-  let mut parents: Vec<usize> = (0..positions.len()).collect();
+/// The wire ports a block offers: a connector's one, a relay's two (its saved wires split by
+/// node: 0–3 input, 4–7 output), an accumulator's none.
+fn ports_of(pos: Pos, saved: &Saved) -> Vec<(PortMember, Vec<SavedWire>)> {
+  let wires = saved_wires(&saved.nbt);
+  match saved.kind {
+    Kind::Relay => {
+      let (input, output): (Vec<SavedWire>, Vec<SavedWire>) = wires
+        .into_iter()
+        .partition(|wire| RelayPort::of_node(wire.node) == RelayPort::Input);
+      vec![
+        (PortMember::relay(pos, RelayPort::Input), input),
+        (PortMember::relay(pos, RelayPort::Output), output),
+      ]
+    }
+    kind if kind.wire_node().is_some() => vec![(PortMember::connector(pos), wires)],
+    _ => Vec::new(),
+  }
+}
+
+/// The connector groups of one pass, each a list of ports in the order they were given. Two
+/// ports share a group when a wire joins them, directly or through others; the two ports of
+/// one relay never do, because the relay bridges between them instead.
+fn net_groups(members: &[PortMember], wires: &[Vec<SavedWire>]) -> Vec<Vec<PortMember>> {
+  let mut parents: Vec<usize> = (0..members.len()).collect();
   fn root(parents: &mut [usize], at: usize) -> usize {
     let mut current = at;
     while parents[current] != current {
@@ -1474,7 +1808,15 @@ fn groups(positions: &[Pos], wires: &[Vec<SavedWire>]) -> Vec<Vec<Pos>> {
   }
   for (at, saved) in wires.iter().enumerate() {
     for wire in saved {
-      if let Some(&other) = index.get(&wire.pos) {
+      // The peer's port is the one whose own list names this port back: a relay records
+      // the wire under the node it went in, and that node is the port.
+      for (other, member) in members.iter().enumerate() {
+        if member.pos != wire.pos {
+          continue;
+        }
+        if !wires[other].iter().any(|back| back.pos == members[at].pos) {
+          continue;
+        }
         let (a, b) = (root(&mut parents, at), root(&mut parents, other));
         if a != b {
           parents[a.max(b)] = a.min(b);
@@ -1482,26 +1824,48 @@ fn groups(positions: &[Pos], wires: &[Vec<SavedWire>]) -> Vec<Vec<Pos>> {
       }
     }
   }
-  let mut found: BTreeMap<usize, Vec<Pos>> = BTreeMap::new();
-  for (at, pos) in positions.iter().enumerate() {
+  let mut found: BTreeMap<usize, Vec<PortMember>> = BTreeMap::new();
+  for (at, member) in members.iter().enumerate() {
     let group = root(&mut parents, at);
-    found.entry(group).or_default().push(*pos);
+    found.entry(group).or_default().push(*member);
   }
   found.into_values().collect()
 }
 
-/// One network's tick: swap the buffer, feed every push connector from it, then draw every pull
-/// connector into it. The buffer lives in the saved compound of the network's lowest-positioned
-/// connector, so a reload cannot lose it.
-fn run_network(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, members: &[Pos]) {
-  let nodes: Vec<Node> = members
+/// One port's state at the start of a network's tick.
+struct WireMember {
+  /// The port: its block positions and which port of it.
+  at: PortMember,
+  /// What the block is (a connector, or the relay port).
+  kind: Kind,
+  /// A connector's mode. A relay port has none: its role is the port.
+  mode: Mode,
+  /// The relay's in-flight buffer (unused for a connector).
+  buffer: i32,
+}
+
+/// One network's tick: swap the buffer, feed every push connector from it, top the relay's
+/// bridge up (or give its output network what the bridge holds), then draw every pull
+/// connector into it. The buffer lives in the saved compound of the network's
+/// lowest-positioned member, so a reload cannot lose it; a relay's in-flight buffer lives in
+/// the relay's own compound.
+fn run_network(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, members: &[PortMember]) {
+  let nodes: Vec<WireMember> = members
     .iter()
-    .filter_map(|&pos| node_at(host, level, keys, pos))
+    .filter_map(|&at| {
+      let saved = saved_at(host, level, keys, at.pos)?;
+      Some(WireMember {
+        at,
+        kind: saved.kind,
+        mode: mode_saved(&saved.nbt).unwrap_or(Mode::None),
+        buffer: int_at(&saved.nbt, CHARGE),
+      })
+    })
     .collect();
   if nodes.len() < 2 {
     return;
   }
-  let Some(controller) = nodes.iter().map(|node| node.pos).min() else {
+  let Some(controller) = nodes.iter().map(|node| node.at.pos).min() else {
     return;
   };
   let Some(nbt) = host
@@ -1520,8 +1884,14 @@ fn run_network(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, members: 
     let mut pool = saved;
     pool.swap();
     let mut wanted = 0;
-    for node in nodes.iter().filter(|node| node.mode == Mode::Push) {
-      let Some((at, side)) = mounted(host, level, node.pos) else {
+    for node in nodes
+      .iter()
+      .filter(|node| node.kind.connector().is_some() && node.mode == Mode::Push)
+    {
+      let Some(connector) = node.kind.connector() else {
+        continue;
+      };
+      let Some((at, side)) = mounted(host, level, node.at.pos) else {
         continue;
       };
       let Some(sink) = level.capability(host, &ENERGY, at, Some(side)) else {
@@ -1529,7 +1899,7 @@ fn run_network(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, members: 
       };
       let room = sink.capacity(host).saturating_sub(sink.amount(host));
       let amount = push_amount(
-        node.connector.max_out(),
+        connector.max_out(),
         i32::try_from(room).unwrap_or(i32::MAX),
         pool.ready,
       );
@@ -1541,15 +1911,51 @@ fn run_network(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, members: 
       let moved = sink.insert(host, tx, asked).min(asked);
       pool.take(i32::try_from(moved).unwrap_or(i32::MAX));
     }
-    for node in nodes.iter().filter(|node| node.mode == Mode::Pull) {
-      let Some((at, side)) = mounted(host, level, node.pos) else {
+    // The relay's two ports are one conduit: the input port tops its buffer up out of the
+    // input network's pool, the output port gives the output network's pool what the
+    // buffer holds. The bridge is gated on `powered`; unpowered, nothing crosses.
+    let mut buffers: BTreeMap<Pos, i32> = nodes
+      .iter()
+      .filter(|node| node.kind == Kind::Relay)
+      .map(|node| (node.at.pos, node.buffer))
+      .collect();
+    for node in nodes.iter().filter(|node| node.kind == Kind::Relay) {
+      let powered = level.block_property(host, node.at.pos, POWERED).as_deref() == Some("true");
+      let buffer = buffers.get(&node.at.pos).copied().unwrap_or(0);
+      if node.at.port == RelayPort::Input.index() {
+        let intake = relay_bridge(powered, buffer, pool.ready, 0).into;
+        let took = pool.take(intake);
+        if took > 0 {
+          buffers.insert(node.at.pos, buffer + took);
+        }
+        // The bridge's demand is what sizes the input network's buffer, as upstream's
+        // `EnergyNetwork.demand` reads the far side's demand.
+        wanted += intake;
+      } else {
+        let given = pool.put(
+          relay_bridge(powered, buffer, 0, pool.room(capacity)).out,
+          capacity,
+        );
+        if given > 0 {
+          buffers.insert(node.at.pos, buffer - given);
+        }
+      }
+    }
+    for node in nodes
+      .iter()
+      .filter(|node| node.kind.connector().is_some() && node.mode == Mode::Pull)
+    {
+      let Some(connector) = node.kind.connector() else {
+        continue;
+      };
+      let Some((at, side)) = mounted(host, level, node.at.pos) else {
         continue;
       };
       let Some(source) = level.capability(host, &ENERGY, at, Some(side)) else {
         continue;
       };
       let amount = pull_amount(
-        node.connector.max_in(),
+        connector.max_in(),
         i32::try_from(source.amount(host)).unwrap_or(i32::MAX),
         pool.room(capacity),
       );
@@ -1560,23 +1966,35 @@ fn run_network(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, members: 
       let moved = source.extract(host, tx, asked).min(asked);
       pool.put(i32::try_from(moved).unwrap_or(i32::MAX), capacity);
     }
-    Ok::<_, ()>((pool, wanted))
+    Ok::<_, ()>((pool, wanted, buffers))
   });
-  let Ok((pool, wanted)) = outcome else {
+  let Ok((pool, wanted, buffers)) = outcome else {
     return;
   };
   let unchanged = int_at(&nbt, NET_READY) == pool.ready
     && int_at(&nbt, NET_NEXT) == pool.next
     && int_at(&nbt, NET_DEMAND) == wanted;
-  if unchanged {
-    return;
+  if !unchanged {
+    let mut data = Compound::new();
+    put_int(&mut data, NET_READY, pool.ready);
+    put_int(&mut data, NET_NEXT, pool.next);
+    put_int(&mut data, NET_DEMAND, wanted);
+    if let Some(entity) = host.block_entity(level, controller) {
+      let _ = entity.merge_data(host, data);
+    }
   }
-  let mut data = Compound::new();
-  put_int(&mut data, NET_READY, pool.ready);
-  put_int(&mut data, NET_NEXT, pool.next);
-  put_int(&mut data, NET_DEMAND, wanted);
-  if let Some(entity) = host.block_entity(level, controller) {
-    let _ = entity.merge_data(host, data);
+  for (at, buffer) in buffers {
+    if nodes
+      .iter()
+      .any(|node| node.at.pos == at && node.buffer == buffer)
+    {
+      continue;
+    }
+    let mut data = Compound::new();
+    put_int(&mut data, CHARGE, buffer);
+    if let Some(entity) = host.block_entity(level, at) {
+      let _ = entity.merge_data(host, data);
+    }
   }
 }
 
@@ -1719,11 +2137,35 @@ pub(crate) fn command_info(host: &mut dyn ServerHost, command: &CommandInvocatio
   feedback(host, &answer);
 }
 
-/// A block's line of text: an accumulator's charge, or a connector's mode, buffer, links and
-/// network buffer. Byte-identical to 0.1.0's readout.
+/// A block's line of text: an accumulator's charge, a connector's mode, buffer, links and
+/// network buffer, or a relay's power bit, in-flight buffer and its two wire lists.
 fn info_line(host: &dyn Host, level: LevelRef, pos: Pos, saved: &Saved) -> String {
   let time = level.game_time(host).unwrap_or(0);
   let Some(connector) = saved.kind.connector() else {
+    if saved.kind == Kind::Relay {
+      let wires = saved_wires(&saved.nbt);
+      let (input, output): (Vec<SavedWire>, Vec<SavedWire>) = wires
+        .into_iter()
+        .partition(|wire| RelayPort::of_node(wire.node) == RelayPort::Input);
+      let powered = level.block_property(host, pos, POWERED).as_deref() == Some("true");
+      return format!(
+        "{} at {},{},{}: powered {}, relay {}/{} FE, input [{}], output [{}], \
+         pool {}/{}, demand {}, t={}",
+        Kind::Relay.label(),
+        pos[0],
+        pos[1],
+        pos[2],
+        powered,
+        int_at(&saved.nbt, CHARGE).clamp(0, RELAY_TRANSFER),
+        RELAY_TRANSFER,
+        links_text(&input),
+        links_text(&output),
+        int_at(&saved.nbt, NET_READY),
+        int_at(&saved.nbt, NET_NEXT),
+        int_at(&saved.nbt, NET_DEMAND),
+        time
+      );
+    }
     let tower = tower_saved(&saved.nbt, pos);
     let charge = tower_amount(host, level, tower).max(0);
     let capacity = tower.capacity();
@@ -1757,20 +2199,7 @@ fn info_line(host: &dyn Host, level: LevelRef, pos: Pos, saved: &Saved) -> Strin
     );
   };
   let charge = int_at(&saved.nbt, CHARGE).max(0);
-  let links = saved_wires(&saved.nbt)
-    .iter()
-    .map(|wire| {
-      format!(
-        "({},{},{})/{}/{}",
-        wire.pos[0],
-        wire.pos[1],
-        wire.pos[2],
-        wire.node,
-        wire.wire.name()
-      )
-    })
-    .collect::<Vec<_>>()
-    .join(" ");
+  let links = links_text(&saved_wires(&saved.nbt));
   format!(
     "{} at {},{},{}: mode {}, buffer {}/{} FE, links [{}], pool {}/{}, demand {}, t={}",
     saved.kind.label(),
@@ -1786,6 +2215,24 @@ fn info_line(host: &dyn Host, level: LevelRef, pos: Pos, saved: &Saved) -> Strin
     int_at(&saved.nbt, NET_DEMAND),
     time
   )
+}
+
+/// A block's saved wires as the readout prints them: `(x,y,z)/node/wire`, space separated.
+fn links_text(wires: &[SavedWire]) -> String {
+  wires
+    .iter()
+    .map(|wire| {
+      format!(
+        "({},{},{})/{}/{}",
+        wire.pos[0],
+        wire.pos[1],
+        wire.pos[2],
+        wire.node,
+        wire.wire.name()
+      )
+    })
+    .collect::<Vec<_>>()
+    .join(" ")
 }
 
 /// A requested amount of FE, no less than an empty buffer and no more than its capacity.
@@ -1988,8 +2435,8 @@ fn link_blocks(
   let Some(second) = saved_at(host, level, keys, b) else {
     return "No connector at the second position.".to_owned();
   };
-  let (Some(from), Some(to)) = (first.kind.connector(), second.kind.connector()) else {
-    return "Both positions must be connectors.".to_owned();
+  let (Some(from), Some(to)) = (first.kind.wire_node(), second.kind.wire_node()) else {
+    return "Both positions must be connectors or a relay.".to_owned();
   };
   let proposal = Proposal {
     a,
@@ -2001,12 +2448,7 @@ fn link_blocks(
   match proposal.check(host, level, keys) {
     Link::Refused(reason) => refusal_text(reason).to_owned(),
     Link::Linked => {
-      let Some(from_node) =
-        saved_at(host, level, keys, a).and_then(|saved| free_node(&saved.nbt, from))
-      else {
-        return refusal_text(Refusal::NodesFull).to_owned();
-      };
-      if proposal.store(host, level, keys, from_node) {
+      if proposal.store(host, level, keys) {
         "Nodes linked.".to_owned()
       } else {
         refusal_text(Refusal::NodesFull).to_owned()
@@ -2472,15 +2914,255 @@ mod tests {
     let c = [8, 0, 0];
     let alone = [40, 0, 0];
     let wires = [vec![wire(b)], vec![wire(a), wire(c)], vec![wire(b)], vec![]];
-    let found = groups(&[a, b, c, alone], &wires);
-    assert_eq!(found, vec![vec![a, b, c], vec![alone]]);
+    let members = [
+      PortMember::connector(a),
+      PortMember::connector(b),
+      PortMember::connector(c),
+      PortMember::connector(alone),
+    ];
+    let found = net_groups(&members, &wires);
+    assert_eq!(
+      found,
+      vec![members[..3].to_vec(), vec![PortMember::connector(alone)]]
+    );
   }
 
   #[test]
   fn a_wire_to_a_connector_that_is_not_there_groups_nothing() {
     let a = [0, 0, 0];
-    let found = groups(&[a], &[vec![wire([99, 0, 0])]]);
-    assert_eq!(found, vec![vec![a]]);
+    let found = net_groups(&[PortMember::connector(a)], &[vec![wire([99, 0, 0])]]);
+    assert_eq!(found, vec![vec![PortMember::connector(a)]]);
+  }
+
+  // --- the redstone relay ---------------------------------------------------
+
+  /// A saved wire at `pos` in `node`.
+  fn node_wire(pos: Pos, node: i32) -> SavedWire {
+    SavedWire {
+      pos,
+      node,
+      wire: Wire::Copper,
+    }
+  }
+
+  #[test]
+  fn a_relay_has_eight_nodes_in_two_ports() {
+    assert_eq!(RELAY_NODES, 8);
+    assert_eq!(WireNode::Relay.nodes(), 8);
+    assert_eq!(
+      WireNode::Relay.connector().wire_length(),
+      16,
+      "a relay's wire is bounded like a small connector's"
+    );
+    assert_eq!(RelayPort::of_node(0), RelayPort::Input);
+    assert_eq!(RelayPort::of_node(3), RelayPort::Input);
+    assert_eq!(RelayPort::of_node(4), RelayPort::Output);
+    assert_eq!(RelayPort::of_node(7), RelayPort::Output);
+    assert_eq!(RelayPort::Input.index(), 0);
+    assert_eq!(RelayPort::Output.index(), 1);
+  }
+
+  #[test]
+  fn a_horizontal_relay_takes_on_the_far_side_and_gives_on_the_facing_side() {
+    let relay = [10, 64, 0];
+    assert_eq!(
+      relay_port_for_peer(Direction::East, false, relay, [9, 64, 0]),
+      RelayPort::Input
+    );
+    assert_eq!(
+      relay_port_for_peer(Direction::East, false, relay, [11, 64, 0]),
+      RelayPort::Output
+    );
+    assert_eq!(
+      relay_port_for_peer(Direction::North, false, relay, [10, 64, 1]),
+      RelayPort::Input
+    );
+    assert_eq!(
+      relay_port_for_peer(Direction::North, false, relay, [10, 64, -1]),
+      RelayPort::Output
+    );
+  }
+
+  #[test]
+  fn a_vertical_relay_reads_above_and_below_and_swaps_its_ports() {
+    assert_eq!(
+      relay_sides(Direction::East, true),
+      [Direction::Up, Direction::Down]
+    );
+    assert_eq!(
+      relay_sides(Direction::East, false),
+      [Direction::South, Direction::North]
+    );
+    assert_eq!(
+      relay_port_for_peer(Direction::East, true, [0, 64, 0], [1, 64, 0]),
+      RelayPort::Input
+    );
+    assert_eq!(
+      relay_port_for_peer(Direction::East, true, [0, 64, 0], [-1, 64, 0]),
+      RelayPort::Output
+    );
+  }
+
+  #[test]
+  fn a_full_relay_port_refuses_rather_than_using_the_other_one() {
+    let mut nbt = Compound::new();
+    store_wires(
+      &mut nbt,
+      &[
+        node_wire([1, 0, 0], 0),
+        node_wire([2, 0, 0], 1),
+        node_wire([3, 0, 0], 2),
+        node_wire([4, 0, 0], 3),
+      ],
+    );
+    assert_eq!(relay_free_node(&nbt, RelayPort::Input), None);
+    assert_eq!(relay_free_node(&nbt, RelayPort::Output), Some(4));
+    let empty = Compound::new();
+    assert_eq!(relay_free_node(&empty, RelayPort::Input), Some(0));
+    assert_eq!(relay_free_node(&empty, RelayPort::Output), Some(4));
+  }
+
+  #[test]
+  fn an_unpowered_relay_carries_nothing_even_with_energy_in_flight() {
+    assert_eq!(
+      relay_bridge(false, 800, 1_000, 80_000),
+      RelayMove::default(),
+      "the redstone signal is the gate: no bridge may move anything unpowered"
+    );
+  }
+
+  #[test]
+  fn a_powered_relay_carries_a_thousand_fe_a_tick_and_keeps_the_rest() {
+    // An empty buffer and 800 waiting: the whole 800 crosses this tick.
+    assert_eq!(
+      relay_bridge(true, 0, 800, 80_000),
+      RelayMove {
+        into: 800,
+        out: 800
+      }
+    );
+    // A 500 buffer and 900 more: the buffer caps at 1,000 and at most 1,000 leaves.
+    assert_eq!(
+      relay_bridge(true, 500, 900, 80_000),
+      RelayMove {
+        into: 500,
+        out: 1_000
+      }
+    );
+    // A full output network holds the rest in the relay, conserved.
+    assert_eq!(
+      relay_bridge(true, 500, 900, 300),
+      RelayMove {
+        into: 500,
+        out: 300
+      }
+    );
+    // The rate caps the intake however much the input network holds.
+    assert_eq!(
+      relay_bridge(true, 0, 5_000, 80_000),
+      RelayMove {
+        into: 1_000,
+        out: 1_000
+      }
+    );
+  }
+
+  #[test]
+  fn any_signal_on_either_side_powers_the_relay() {
+    assert!(!relay_power_from([0, 0]));
+    assert!(relay_power_from([15, 0]));
+    assert!(relay_power_from([0, 1]));
+  }
+
+  #[test]
+  fn a_relay_splits_a_wire_run_into_an_input_and_an_output_network() {
+    let c1 = [0, 0, 0];
+    let relay = [1, 0, 0];
+    let c2 = [2, 0, 0];
+    let extra = [0, 0, 1];
+    let members = [
+      PortMember::connector(c1),
+      PortMember::relay(relay, RelayPort::Input),
+      PortMember::relay(relay, RelayPort::Output),
+      PortMember::connector(c2),
+      PortMember::connector(extra),
+    ];
+    let wires = [
+      vec![node_wire(relay, 0), node_wire(extra, 0)],
+      vec![node_wire(c1, 0), node_wire(extra, 1)],
+      vec![node_wire(c2, 4)],
+      vec![node_wire(relay, 0)],
+      vec![node_wire(c1, 0), node_wire(relay, 1)],
+    ];
+    let found = net_groups(&members, &wires);
+    assert_eq!(
+      found,
+      vec![
+        vec![members[0], members[1], members[4]],
+        vec![members[2], members[3]]
+      ],
+      "the relay's two ports are separate networks, and the extra connector joins only the input one"
+    );
+  }
+
+  #[test]
+  fn the_relay_rig_moves_energy_only_while_powered() {
+    // The e2e's rig in the rules: source connector → input network → relay → output
+    // network → sink connector, with the pool ceilings the pass computes.
+    let run = |powered: bool| {
+      let mut source = 100_000;
+      let mut sink = 0;
+      let input_cap = buffer_capacity(2, RELAY_TRANSFER);
+      let output_cap = buffer_capacity(2, RELAY_TRANSFER);
+      let mut input = Pool::default();
+      let mut output = Pool::default();
+      let mut relay = 0;
+      for _ in 0..20 {
+        input.swap();
+        let pulled = pull_amount(1_000, source, input.room(input_cap));
+        input.put(pulled, input_cap);
+        source -= pulled;
+        let intake = relay_bridge(powered, relay, input.ready, 0).into;
+        relay += input.take(intake);
+        output.swap();
+        let given = output.put(
+          relay_bridge(powered, relay, 0, output.room(output_cap)).out,
+          output_cap,
+        );
+        relay -= given;
+        let pushed = push_amount(1_000, 2_000_000 - sink, output.ready);
+        output.take(pushed);
+        sink += pushed;
+        assert_eq!(
+          source + sink + input.total() + output.total() + relay,
+          100_000,
+          "energy moved through the relay, never made or lost"
+        );
+      }
+      sink
+    };
+    assert_eq!(
+      run(false),
+      0,
+      "an unpowered relay must not let one FE reach the sink"
+    );
+    assert!(
+      run(true) > 0,
+      "a powered relay must carry energy from its input to its output"
+    );
+  }
+
+  #[test]
+  fn a_player_facing_north_places_the_relay_east_west() {
+    assert_eq!(yaw_facing(0.0), Direction::South);
+    assert_eq!(yaw_facing(90.0), Direction::West);
+    assert_eq!(yaw_facing(180.0), Direction::North);
+    assert_eq!(yaw_facing(270.0), Direction::East);
+    assert_eq!(yaw_facing(-90.0), Direction::East);
+    assert_eq!(clockwise(Direction::North), Direction::East);
+    assert_eq!(clockwise(Direction::East), Direction::South);
+    assert_eq!(counter_clockwise(Direction::East), Direction::North);
+    assert_eq!(counter_clockwise(Direction::North), Direction::West);
   }
 
   #[test]

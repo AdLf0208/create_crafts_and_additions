@@ -33,10 +33,16 @@
 #  E  copper between two large connectors is refused (gold is accepted), as
 #     upstream's `REQUIRES_HIGH_CURRENT`;
 #  F  an accumulator feeds the block above it (`tickOutput`), and both stay empty
-#     when both start empty.
+#     when both start empty;
+#  G  the accumulator tower (3x3x5 multiblock, one pool, split, salvage, doctored saves);
+#  H  every carried block drops one of itself through its 26.3 loot table;
+#  I  the redstone relay: an unpowered relay between two accumulators moves nothing
+#     over 20 ticks, a redstone block on its side sets `powered=true` and the sink
+#     then gains FE with the source, both pools and the relay's buffer conserved.
 #
 # SELFTEST=1 flips B's conservation assertion (it must FAIL), proving the
-# scenario can fail.
+# scenario can fail. RELAY_SELFTEST=1 flips I's unpowered gate assertion instead, so
+# the relay leg's own counterfactual is a run of its own.
 #
 # The 0.1.0 runs of this scenario (PASS/EXIT:0 default, PASS/EXIT:0 with the
 # bundle's embedded content, FAIL/EXIT:1 selftest) are historical evidence for the
@@ -223,7 +229,7 @@ command_reply() { # command_reply COMMAND REPLY_PATTERN
 info() { # info X Y Z
     # The reply names the position, so a line about another block can never be
     # mistaken for this one.
-    command_reply "createaddition info $1 $2 $3" "^(Connector|Large Connector|Modular Accumulator) at $1,$2,$3:"
+    command_reply "createaddition info $1 $2 $3" "^(Connector|Large Connector|Modular Accumulator|Redstone Relay) at $1,$2,$3:"
     INFO_LINE=$REPLY
     eval "$(python3 "$PORT/tools/parse_info.py" "$INFO_LINE")"
     [ "${ok:-0}" = 1 ] || fail "the info line did not parse: $INFO_LINE"
@@ -338,6 +344,13 @@ control_leg() {
     name=$(block_name "$CX1" 100 0)
     [ "$name" != "createaddition:connector" ] || fail "the control game placed a connector, so the block id was known"
     echo "  the control's setblock left $(block_name "$CX1" 100 0) (the arena floor)" >&2
+    # The relay is this slice's new id: the same package-less game must not know it either.
+    local relay_at=$((X0 + 2))
+    ctl command "execute in minecraft:the_end run setblock $relay_at 101 0 createaddition:redstone_relay" >/dev/null 2>&1 || true
+    ctl wait 4 >/dev/null
+    [ "$(block_name "$relay_at" 101 0)" != "createaddition:redstone_relay" ] \
+        || fail "the control game placed a redstone relay, so the block id was known"
+    echo "  the control's setblock left $(block_name "$relay_at" 101 0) where the relay would be" >&2
     ctl quit >/dev/null 2>&1 || true
 }
 
@@ -395,7 +408,7 @@ break_drop_leg() { # break_drop_leg BLOCK -> sets DROPPED
 if [ "${LOOT_ONLY:-0}" = 1 ]; then
     launch "$GAME" "$WORLD"
     arena
-    for LOOT_BLOCK in createaddition:connector createaddition:large_connector createaddition:modular_accumulator; do
+    for LOOT_BLOCK in createaddition:connector createaddition:large_connector createaddition:modular_accumulator createaddition:redstone_relay; do
         break_drop_leg "$LOOT_BLOCK"
         [ "$DROPPED" = 1 ] \
             || fail "mining $LOOT_BLOCK dropped $DROPPED of itself, expected the one its 26.3 loot table names"
@@ -743,7 +756,7 @@ echo "== H: every block's loot table drops the block itself (the 26.3 dialect) =
 # `"condition"`; 26.3's own tables (the prepared resources) write one `"condition":
 # {"type": ...}` per pool and have no `bonus_rolls`. Carried verbatim, the 1.21.1 shape made a
 # block drop nothing (`modularrouters` measured 0 while a vanilla table beside it dropped 1).
-for LOOT_BLOCK in createaddition:connector createaddition:large_connector createaddition:modular_accumulator; do
+for LOOT_BLOCK in createaddition:connector createaddition:large_connector createaddition:modular_accumulator createaddition:redstone_relay; do
     break_drop_leg "$LOOT_BLOCK"
     [ "$DROPPED" = 1 ] \
         || fail "mining $LOOT_BLOCK dropped $DROPPED of itself, expected the one its 26.3 loot table names"
@@ -751,4 +764,122 @@ for LOOT_BLOCK in createaddition:connector createaddition:large_connector create
 done
 echo "  all three blocks drop one of themselves through their 26.3 loot tables" >&2
 
-echo "PASS: FE crossed the wire at 1,000/t and was conserved, an unlinked connector moved nothing, the 16-block limit held, copper was refused between two large connectors, an accumulator fed the block above it, a three-high tower formed one 6,000,000 FE pool, a broken tower re-formed at 4,000,000, separated accumulators stayed singles, a doctored saved tower was refused as its block's own single, and every block drops itself"
+echo "== I: the redstone relay gates a wire between two accumulators =="
+# The jar's relay (`RedstoneRelayBlockEntity`, `WireGraph.tickBridges`): eight wire nodes in
+# two ports, 0-3 input and 4-7 output, and energy crosses from its input network to its
+# output network only while the block's `powered` bit is set. The rig is
+# A - C1 - relay - C2 - B on its own stone pad, away from the arena's device blocks; the
+# relay is flat and faces east, so C1 (west) is its input and C2 (east) its output.
+RIG_X=$((X0 + 34))
+RIG_A=$((RIG_X - 2))
+RIG_C1=$((RIG_X - 1))
+RIG_C2=$((RIG_X + 2))
+RIG_B=$((RIG_X + 3))
+ctl command "execute in minecraft:the_end run fill $((RIG_A - 1)) 100 -2 $((RIG_B + 1)) 100 2 minecraft:stone" >/dev/null
+ctl command "execute in minecraft:the_end run fill $((RIG_A - 1)) 101 -2 $((RIG_B + 1)) 104 2 minecraft:air" >/dev/null
+ctl wait 6 >/dev/null
+place_accumulator "$RIG_A"
+place_accumulator "$RIG_B"
+place_connector "$RIG_C1" west
+place_connector "$RIG_C2" east
+ctl command "execute in minecraft:the_end run setblock $RIG_X 100 0 createaddition:redstone_relay[facing=east,vertical=false,powered=false]" >/dev/null
+ctl wait 6 >/dev/null
+[ "$(block_name "$RIG_X" 100 0)" = "createaddition:redstone_relay" ] \
+    || fail "the relay did not place at $RIG_X,100 (got '$(block_name "$RIG_X" 100 0)')"
+RELAY_STATE=$(block_state "$RIG_X" 100 0)
+case "$RELAY_STATE" in
+    *powered=false*) echo "  $RELAY_STATE" >&2 ;;
+    *) fail "a freshly placed relay reads '$RELAY_STATE', expected powered=false" ;;
+esac
+# C1 sits on the source accumulator and settles `pull` by itself; C2 must push into the sink.
+info "$RIG_C1" 100 0
+[ "$mode" = pull ] || fail "the source-side connector took mode '$mode', expected pull"
+set_mode "$RIG_C2" push
+link "$RIG_C1" "$RIG_X" copper
+[ "$LAST_REPLY" = "Nodes linked." ] || fail "the wire onto the relay's input was not laid: $LAST_REPLY"
+link "$RIG_X" "$RIG_C2" copper
+[ "$LAST_REPLY" = "Nodes linked." ] || fail "the wire off the relay's output was not laid: $LAST_REPLY"
+info "$RIG_X" 100 0
+[ "$kind" = relay ] || fail "the relay reads as '$kind'"
+[ "$input_links" = 1 ] && [ "$output_links" = 1 ] \
+    || fail "the relay holds $input_links input and $output_links output wire(s), expected one each"
+echo "  relay input [(233,100,0)] and output [(236,100,0)], powered=false" >&2
+
+# The source, the sink, both network pools and the relay's in-flight buffer, read as one
+# instant: both connectors are parked in `none`, and for a powered read the redstone block is
+# taken away first so the bridge cannot shift energy between the five reads.
+relay_measure() { # relay_measure POWERED(0|1) -> R_SOURCE R_SINK R_POOL1 R_POOL2 R_RELAY R_TOTAL
+    # Not named `powered`: `info` evals the relay's `powered=...` field, and bash's dynamic
+    # scoping would put it into this function's local of the same name.
+    local with_power=$1
+    if [ "$with_power" = 1 ]; then
+        ctl command "execute in minecraft:the_end run setblock $RIG_X 100 1 minecraft:air" >/dev/null
+        ctl wait 4 >/dev/null
+    fi
+    command_reply "createaddition mode $RIG_C1 100 0 none" "$MODE_REPLY"
+    command_reply "createaddition mode $RIG_C2 100 0 none" "$MODE_REPLY"
+    info "$RIG_A" 100 0
+    R_SOURCE=$energy
+    info "$RIG_B" 100 0
+    R_SINK=$energy
+    info "$RIG_C1" 100 0
+    R_POOL1=$((pool_ready + pool_next))
+    info "$RIG_C2" 100 0
+    R_POOL2=$((pool_ready + pool_next))
+    info "$RIG_X" 100 0
+    R_RELAY=$energy
+    # The relay is the output network's lowest member, so its compound holds that network's
+    # pool too; the relay's line prints it.
+    R_NET=$((pool_ready + pool_next))
+    R_TOTAL=$((R_SOURCE + R_SINK + R_POOL1 + R_POOL2 + R_RELAY + R_NET))
+    command_reply "createaddition mode $RIG_C1 100 0 pull" "$MODE_REPLY"
+    command_reply "createaddition mode $RIG_C2 100 0 push" "$MODE_REPLY"
+    if [ "$with_power" = 1 ]; then
+        ctl command "execute in minecraft:the_end run setblock $RIG_X 100 1 minecraft:redstone_block" >/dev/null
+        ctl wait 4 >/dev/null
+        echo "  (measurement restored the power: $(block_state "$RIG_X" 100 0))" >&2
+    fi
+}
+
+seed_at "$RIG_A" 100 "$SEED"
+relay_measure 0
+UNPOWERED_SINK=$R_SINK
+UNPOWERED_TOTAL=$R_TOTAL
+ctl wait "$TICKS"
+relay_measure 0
+echo "  unpowered: source $R_SOURCE, sink $UNPOWERED_SINK->$R_SINK, pools $R_POOL1/$R_POOL2/$R_NET, relay $R_RELAY, total $UNPOWERED_TOTAL->$R_TOTAL" >&2
+if [ "$SELFTEST" = 1 ] || [ "${RELAY_SELFTEST:-0}" = 1 ]; then
+    # The deliberately wrong expectation: an unpowered relay MUST NOT carry a single FE.
+    # It does not, so this leg fails — the counterfactual for the gate assertion below.
+    [ "$R_SINK" != "$UNPOWERED_SINK" ] || fail "RELAY_SELFTEST: the unpowered relay moved the sink"
+fi
+[ "$R_SINK" = "$UNPOWERED_SINK" ] \
+    || fail "the unpowered relay let $((R_SINK - UNPOWERED_SINK)) FE into the sink over $TICKS ticks"
+[ "$R_TOTAL" = "$UNPOWERED_TOTAL" ] \
+    || fail "FE was not conserved with the relay unpowered: $UNPOWERED_TOTAL -> $R_TOTAL"
+
+echo "  powering the relay with a redstone block on its side"
+ctl command "execute in minecraft:the_end run setblock $RIG_X 100 1 minecraft:redstone_block" >/dev/null
+ctl wait 6 >/dev/null
+RELAY_STATE=$(block_state "$RIG_X" 100 0)
+case "$RELAY_STATE" in
+    *powered=true*) echo "  $RELAY_STATE" >&2 ;;
+    *) fail "the relay did not read the redstone block: '$RELAY_STATE'" ;;
+esac
+relay_measure 1
+POWERED_SOURCE=$R_SOURCE
+POWERED_SINK=$R_SINK
+POWERED_TOTAL=$R_TOTAL
+ctl wait "$TICKS"
+relay_measure 1
+MOVED=$((POWERED_SOURCE - R_SOURCE))
+GAINED=$((R_SINK - POWERED_SINK))
+echo "  powered: source $POWERED_SOURCE->$R_SOURCE, sink $POWERED_SINK->$R_SINK, pools $R_POOL1/$R_POOL2/$R_NET, relay $R_RELAY, total $POWERED_TOTAL->$R_TOTAL" >&2
+[ "$MOVED" -gt 0 ] || fail "nothing left the source over $TICKS ticks with the relay powered"
+[ "$GAINED" -gt 0 ] || fail "the sink gained nothing over $TICKS ticks with the relay powered"
+[ "$GAINED" -le "$MOVED" ] || fail "the sink gained $GAINED FE while the source lost $MOVED"
+[ "$R_TOTAL" = "$POWERED_TOTAL" ] \
+    || fail "FE was not conserved across the powered relay: $POWERED_TOTAL -> $R_TOTAL"
+echo "  the powered relay carried $GAINED FE to the sink, conserved at $R_TOTAL" >&2
+
+echo "PASS: FE crossed the wire at 1,000/t and was conserved, an unlinked connector moved nothing, the 16-block limit held, copper was refused between two large connectors, an accumulator fed the block above it, a three-high tower formed one 6,000,000 FE pool, a broken tower re-formed at 4,000,000, separated accumulators stayed singles, a doctored saved tower was refused as its block's own single, every block drops itself, and the redstone relay passed energy only while powered"

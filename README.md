@@ -1,8 +1,9 @@
-# Create Crafts & Additions — Horizon port (slices 1–2: the FE half)
+# Create Crafts & Additions — Horizon port (slices 1–4: the FE half)
 
 A native Horizon port of **Create Crafts & Additions 1.7.2** (`MRH0/createaddition`, **MIT**): the
 electric half of the mod — two connectors, wire links and the modular accumulator, including the
-jar's 3×3×5 accumulator multiblock — with the jar's own transfer rates.
+jar's 3×3×5 accumulator multiblock, plus the redstone relay that bridges one wire network into
+another while powered — with the jar's own transfer rates.
 
 **LOCAL-ONLY** until the maintainer approves publishing (ARCHITECTURE.md §8). MIT is licence rank 0
 (permissive); the approval is still required.
@@ -23,15 +24,15 @@ carried `assets/` and `data/`. One `createaddition.hmod` installs both — there
 file, no `.horizon-cache` write and no dev-mod list to manage (the retired 0.1.0 `.hnmod` embedded
 the content that way; see `notes.md`).
 
-Three blocks and seven items:
+Four blocks and seven items:
 
 | Kind | Ids |
 |---|---|
-| Blocks | `createaddition:connector`, `createaddition:large_connector`, `createaddition:modular_accumulator` |
+| Blocks | `createaddition:connector`, `createaddition:large_connector`, `createaddition:modular_accumulator`, `createaddition:redstone_relay` |
 | Items | `createaddition:copper_wire`, `gold_wire`, `electrum_wire`, `spool`, `copper_spool`, `gold_spool`, `electrum_spool` |
 
 Each block drops itself when mined with a pickaxe (its own 26.3 loot table, and the carried
-`minecraft:mineable/pickaxe` tag); the three blocks are also creative-obtainable.
+`minecraft:mineable/pickaxe` tag); the four blocks are also creative-obtainable.
 
 ## What it does
 
@@ -56,6 +57,11 @@ Each block drops itself when mined with a pickaxe (its own 26.3 loot table, and 
   whole pool**, so a connector on any part drains the tower. The jar's `top`/`bottom` state bits
   decide which layer outputs above and which below (`tickOutput`), so a tower never feeds itself;
   a single block keeps both bits and feeds both ways.
+- The **redstone relay** has eight wire nodes in two ports (0–3 input, 4–7 output). Its input port
+  joins one wire network and its output port another, and energy crosses only while the block's
+  `powered` bit is set — a redstone block or wire on either side of its long axis sets it, at most
+  **1,000 FE/t** through a 1,000 FE in-flight buffer. Unpowered, nothing crosses; the e2e measures
+  the sink staying still for 20 ticks.
 - FE is moved through the engine's `ENERGY` capability (`LevelRef::capability` +
   `EnergyHandler::insert`/`extract`, and `move_energy` for the accumulator), never created: the
   runtime's own conservation test and the in-game check both prove source + sink + buffer is
@@ -71,14 +77,14 @@ reply repeats as ` [#tag]` so a harness can tell answers apart. The readout text
 ## Layout
 
 ```
-horizon-mod.toml               the only manifest and identity: id, version 0.2.3, api 0.2, [native]
+horizon-mod.toml               the only manifest and identity: id, version 0.2.4, api 0.2, [native]
 Cargo.toml                     one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 rustfmt.toml                   tab_spaces = 2, the campaign's style
 src/lib.rs                     the one impl Hooks: register, level_tick_post, commands
 src/network.rs                 game glue: the block entity Part, the wire links, the pass, commands
 src/runtime.rs                 the pure rules (30 tests), byte-identical to the retired bundle's
-assets/createaddition/         55 carried files: blockstates, models, textures, items, lang
-data/createaddition/           13 carried files: block and item definitions, loot tables
+assets/createaddition/         67 carried files: blockstates, models, textures, items, lang
+data/                          16 carried files (incl. the minecraft harvest tag): block and item definitions, loot tables
 createaddition.hmod            the deliverable: one file, code + content
 tools/
   carry_content.py [--check]   jar -> assets/ and data/, with the patches documented

@@ -1,10 +1,17 @@
-# Package receipt — createaddition 0.2.3
+# Package receipt — createaddition 0.2.4
 
 | field | value |
 |---|---|
-| version | `0.2.3` |
+| version | `0.2.4` |
 | file | `createaddition.hmod` |
-| bytes | 133,587 |
-| sha256 | `1b29b731068bc6a2f21281fc88f60b7643b39f819a4a2f8885d0ad0818fe53d6` |
+| bytes | 150,070 |
+| sha256 | `8b5b1c2250b1d884d0b35fdc90a1cff5d46e3de7354dd95640ed34572783eacd` |
+| source | this tag — the tree here is the source that produced the archive |
+| game | 26.3 |
 | horizon | `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` |
 | horizon-mixins | `e59da9094f0c2fdda6c627fe9eff22dec6a906f0` |
+
+## Verification of these exact bytes
+
+See `notes.md` and `VALIDATION.md` at this tag for the full ladder; the digest above is the
+release asset's.

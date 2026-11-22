@@ -1,0 +1,57 @@
+{
+  "template": "minecraft:smooth_stone",
+  "item": true,
+  "properties": {
+    "hardness": 1.5,
+    "explosion_resistance": 6.0,
+    "requires_tool": true,
+    "occludes": false,
+    "sounds": "minecraft:stone"
+  },
+  "state_properties": {
+    "facing": {
+      "type": "enum",
+      "values": [
+        "north",
+        "south",
+        "west",
+        "east"
+      ]
+    },
+    "vertical": {
+      "type": "boolean"
+    },
+    "powered": {
+      "type": "boolean"
+    }
+  },
+  "default_state": {
+    "facing": "north",
+    "vertical": "false",
+    "powered": "false"
+  },
+  "shapes": {
+    "default": [
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.125,
+        1.0
+      ]
+    ]
+  },
+  "collision_shapes": {
+    "default": [
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.125,
+        1.0
+      ]
+    ]
+  }
+}

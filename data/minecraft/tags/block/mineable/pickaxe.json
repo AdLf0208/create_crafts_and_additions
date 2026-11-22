@@ -2,6 +2,7 @@
   "values": [
     "createaddition:connector",
     "createaddition:large_connector",
+    "createaddition:redstone_relay",
     "createaddition:modular_accumulator"
   ]
 }

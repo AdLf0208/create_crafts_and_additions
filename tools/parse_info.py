@@ -3,6 +3,7 @@
 
     Connector at 11,100,0: mode pull, buffer 0/1000 FE, links [(15,100,0)/0/gold], pool 0/0, demand 0, t=1234
     Modular Accumulator at 10,100,0: 95000/2000000 FE (t=1234)
+    Redstone Relay at 234,100,0: powered false, relay 0/1000 FE, input [], output [], pool 0/0, demand 0, t=1234
 
 Prints `key=value` lines for `eval`; `ok=1` when the line parsed. Values are
 plain integers or bare words, so the output is safe to `eval` in bash.
@@ -15,6 +16,13 @@ import sys
 CONNECTOR = re.compile(
     r"^(Connector|Large Connector) at (-?\d+),(-?\d+),(-?\d+): mode (\w+), "
     r"buffer (\d+)/(\d+) FE, links \[(.*?)\], pool (\d+)/(\d+), demand (\d+), t=(\d+)$"
+)
+# The relay: `Redstone Relay at 234,100,0: powered false, relay 0/1000 FE, input
+# [(233,100,0)/0/copper], output [(236,100,0)/4/copper], t=1234`.
+RELAY = re.compile(
+    r"^Redstone Relay at (-?\d+),(-?\d+),(-?\d+): powered (true|false), "
+    r"relay (\d+)/(\d+) FE, input \[(.*?)\], output \[(.*?)\], "
+    r"pool (\d+)/(\d+), demand (\d+), t=(\d+)$"
 )
 ACCUMULATOR = re.compile(
     r"^Modular Accumulator at (-?\d+),(-?\d+),(-?\d+): (\d+)/(\d+) FE \(t=(\d+)\)$"
@@ -33,6 +41,34 @@ def main() -> int:
     # A tagged reply ends with ` [#tag]`; the tag is the harness's, not the
     # block's.
     line = TAG.sub("", sys.argv[1].strip())
+    match = RELAY.match(line)
+    if match:
+        x, y, z, powered, buffer, capacity, input_, output, ready, next_, demand, ticks = (
+            match.groups()
+        )
+        values = {
+            "kind": "relay",
+            "large": 0,
+            "x": x,
+            "y": y,
+            "z": z,
+            "mode": "none",
+            "powered": 1 if powered == "true" else 0,
+            "energy": buffer,
+            "capacity": capacity,
+            "links": (0 if input_.strip() == "" else input_.count("("))
+            + (0 if output.strip() == "" else output.count("(")),
+            "input_links": 0 if input_.strip() == "" else input_.count("("),
+            "output_links": 0 if output.strip() == "" else output.count("("),
+            "pool_ready": ready,
+            "pool_next": next_,
+            "demand": demand,
+            "t": ticks,
+        }
+        for name, value in values.items():
+            print(f"{name}={value}")
+        print("ok=1")
+        return 0
     match = CONNECTOR.match(line)
     if match:
         kind, x, y, z, mode, buffer, capacity, links, ready, next_, demand, ticks = match.groups()

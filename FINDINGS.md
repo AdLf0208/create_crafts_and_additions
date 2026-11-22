@@ -108,6 +108,25 @@ does not try. The `create:` items its recipes need are likewise absent.
 - One accumulator block is a controller and its energy lives in
   `EnergyContent { energy }` in its saved compound.
 
+### Redstone relay — `blocks/redstone_relay/`, `energy/network/WireGraph.java`
+
+- `RedstoneRelayBlockEntity.NODE_COUNT = 8`; `WireNodeKind.RELAY` gives node 0–3 port 0 (input) and
+  4–7 port 1 (output), `portCount() = 2`, `isBridge() = true`, and
+  `isPowered(state) = state.getValue(POWERED)`.
+- `getMaxWireLength()` is `SMALL_CONNECTOR_MAX_LENGTH` (16) and `getConnectorType()` is
+  `ConnectorType.Small`; a relay is a low-current node.
+- `getAvailableNode(click)`: the click's half of the block picks the port (horizontal: the `facing`
+  side is the output; vertical: the halves swap), and a full half returns -1 rather than using the
+  other.
+- `RedstoneRelayBlock.updateState` schedules a 2-tick tick when `calculateInputStrength` crosses 0:
+  horizontal reads `getSignal`/`getDirectSignal` on the two sides across the long axis (and redstone
+  wire power), vertical reads `getSignal` above and below. `setBlockState` tells the wire graph.
+- `WireGraph.tickBridges`: for a loaded bridge, `throughput = 0` and it `continue`s unless
+  `powered`; otherwise `out.push(in.pull(bridge.demand))` and `demand = in.demand(out.getDemand())`
+  — the input network's buffer feeds the output network's, and the output network's demand sizes the
+  input buffer.
+- No energy capability: the relay is a wire node, not a storage block.
+
 ## Where this port differs (declared)
 
 1. **No kinetic half.** `electric_motor`, `alternator`, `rolling_mill`,
@@ -116,9 +135,9 @@ does not try. The `create:` items its recipes need are likewise absent.
    could only be *consumed* by reading a neighbour's published
    `Speed/Capacity/Stress/NetworkStatus` NBT (`native_with_mod_block_entity`,
    API 18) and this slice does not need it.
-2. **Single-block accumulator.** The multiblock (up to 5×3 blocks,
-   `getTotalAccumulatorSize()`) is a gap; the block keeps its `top`/`bottom`
-   state bits (both true) and outputs up and down like one block of the tower.
+2. ~~**Single-block accumulator.**~~ **Closed in 0.2.2**: the multiblock (up to 5 high × 3 wide,
+   `getTotalAccumulatorSize()`) forms, one pool behind every block, split on a broken block — see
+   `notes.md` `## Slice 2`.
 3. **`small_light_connector`** (1 FE/t consumption, festive lamp) is a gap.
 4. **Node choice from the click point is not reproduced**: the pin's
    `use_item_on` gives the block face, not the click location, so a link takes

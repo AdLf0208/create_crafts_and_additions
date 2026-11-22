@@ -1,4 +1,65 @@
-# Validation — Create Crafts & Additions slices 1–3
+# Validation — Create Crafts & Additions slices 1–4
+
+## 0.2.4 — the redstone relay
+
+Pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (nightly 2026-11-20), mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`; every cargo step inside one
+`ports/tools/build-slot.sh` lease (`CARGO_INCREMENTAL=0`, no `--target-dir`, `BUILD_LOCAL=1`).
+The in-game legs use the launcher-built game (`ports/tools/launcher-game.sh`, launcher 0.2.92);
+the relay build is `native-0a875da-39565764a7f0`.
+
+Logs: `ports/_shared/evidence/createaddition/` (`relay-red.log`, `probe-relay.log`, `sdk-*.log`,
+`verify-sdk-package.log`) and `ports/_shared/evidence/createaddition-e2e/` (`e2e-relay-*.log`).
+
+```
+red, pre-slice relay rules     5 failed: 61 passed  (relay-red.log)
+  port choice                  left: Input  right: Output
+  vertical port choice         left: Input  right: Output
+  unpowered bridge             left: RelayMove { into: 200, out: 1000 }  right: RelayMove { into: 0, out: 0 }
+  two networks                 left: one group  right: [[input],[output]]
+  rig, unpowered               left: 18000  right: 0
+cargo test --offline             66 passed, 0 failed              (sdk-test.log)
+cargo clippy --all-targets --offline -- -D warnings   exit 0, 0 warnings (sdk-clippy.log)
+cargo fmt --check                clean                            (sdk-fmt.log)
+rm -f Cargo.lock && cargo horizon-mod build           exit 0       (sdk-build.log)
+cargo horizon-mod build (again)  byte-identical (cmp)             (sdk-build-second.log)
+cargo horizon-mod check createaddition.hmod           exit 0       (sdk-check.log)
+fits --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a  "0a875da  made for" (sdk-fits-pin.log)
+fits --build 0b14f8acfd97fa2c750e42795249dcc981178ca4  "0b14f8a  fits"     (sdk-fits-other.log)
+python3 tools/check_licence.py    upstream notice verbatim        (licence-notice.log)
+python3 tools/data_shape.py createaddition.hmod   4/4 26.3 loot tables
+python3 tools/carry_content.py --check    assets/ and data/ match the jar carry
+python3 ports/tools/verify-sdk-package.py createaddition   1/1     (verify-sdk-package.log)
+```
+
+Deliverable: `createaddition.hmod`, **150,070 B**, SHA-256
+`8b5b1c2250b1d884d0b35fdc90a1cff5d46e3de7354dd95640ed34572783eacd`, **94 entries**, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too), **83** carried `assets/`+`data/` files.
+
+```
+createaddition 0.2.4 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  150070 bytes, SHA-256 8b5b1c2250b1d884d0b35fdc90a1cff5d46e3de7354dd95640ed34572783eacd, unsigned
+```
+
+```
+Create Crafts & Additions:
+0a875da  made for
+Create Crafts & Additions:
+0b14f8a  fits
+```
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-relay-default.log` | `PASS` + `EXIT:0` | A–I: the relay's unpowered 20 ticks move the sink not at all, `powered=true` from a redstone block makes it gain 24,020 FE from a 100,000 FE source with source + sink + both pools + the relay's buffer conserved, and all **four** loot tables drop one of themselves |
+| `e2e-relay-selftest.log` | `FAIL` + `EXIT:1` | the suite's own counterfactual (`SELFTEST: the conservation assertion did not trip`) |
+| `e2e-relay-gate-selftest.log` | `FAIL` + `EXIT:1` | the relay gate assertion itself (`RELAY_SELFTEST: the unpowered relay moved the sink`) |
+| `e2e-relay-control.log` | `FAIL` + `EXIT:1` | the package-less game knows neither the block nor the relay id |
+| `probe-relay.log` | `EXIT:0` | the probe: 99,980 → 0 through the relay across a power cycle, with the saved `netReady/netNext/netDemand`/`energy` |
+
+`python3 ports/tools/check-e2e-logs.py createaddition createaddition-e2e --strict`:
+**logs=16 ok=16 missing-exit=0 bad-exit=0**.
+
 
 ## 0.2.3 — the three review fixes (PR #1526)
 

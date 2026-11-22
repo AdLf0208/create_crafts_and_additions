@@ -30,8 +30,8 @@ ROOT = Path(__file__).resolve().parents[1]
 JAR = ROOT.parent / "_shared/licence-cache/createaddition-1.7.2.jar"
 NS = "createaddition"
 
-# The slice's three blocks and seven items (FINDINGS.md, "Jar inventory").
-BLOCKS = ["connector", "large_connector", "modular_accumulator"]
+# The slice's four blocks and seven items (FINDINGS.md, "Jar inventory").
+BLOCKS = ["connector", "large_connector", "modular_accumulator", "redstone_relay"]
 ITEMS = [
     "copper_wire",
     "gold_wire",
@@ -58,11 +58,15 @@ BLOCK_MODELS = [
     "block/modular_accumulator/block_middle",
     "block/modular_accumulator/block_top",
     "block/modular_accumulator/item",
+    "block/redstone_relay/redstone_relay_off",
+    "block/redstone_relay/redstone_relay_on",
+    "block/redstone_relay/item",
 ]
 ITEM_MODELS = [f"item/{item}" for item in ITEMS] + [
     "item/connector",
     "item/large_connector",
     "item/modular_accumulator",
+    "item/redstone_relay",
 ]
 # Textures no carried model names (the accumulator's gauge is drawn by its
 # block entity in upstream; the connector's bulb is for the light variant).
@@ -70,6 +74,9 @@ EXTRA_TEXTURES = [
     "block/connector/bulb",
     "block/modular_accumulator/gauge",
 ]
+# The relay's blockstate is the jar's own 16-variant table: it names only this
+# mod's models and the `facing`/`powered`/`vertical` properties this port declares.
+VERBATIM_BLOCKSTATES = ["modular_accumulator", "redstone_relay"]
 
 
 def model_textures(jar: zipfile.ZipFile, models: list[str]) -> list[str]:
@@ -115,6 +122,7 @@ LANG_KEYS = [
     "block.createaddition.connector",
     "block.createaddition.large_connector",
     "block.createaddition.modular_accumulator",
+    "block.createaddition.redstone_relay",
     "item.createaddition.copper_wire",
     "item.createaddition.gold_wire",
     "item.createaddition.electrum_wire",
@@ -125,6 +133,7 @@ LANG_KEYS = [
     "item.createaddition.spool.nbt",
     "createaddition.tooltip.connector.info",
     "createaddition.tooltip.accumulator.info",
+    "createaddition.tooltip.relay.info",
     "createaddition.tooltip.energy.mode",
     "createaddition.tooltip.energy.pull",
     "createaddition.tooltip.energy.push",
@@ -300,6 +309,37 @@ def build(root: Path) -> None:
         json.dumps(accumulator, indent=2) + "\n",
     )
 
+    # The relay: the jar's `horizontal_facing`, `vertical` and `powered` state bits, its
+    # 2-pixel plate shape, and no energy buffer of its own (its 1,000 FE is the bridge's
+    # in-flight buffer, written by the port's pass).
+    relay = {
+        "template": "minecraft:smooth_stone",
+        "item": True,
+        "properties": {
+            "hardness": 1.5,
+            "explosion_resistance": 6.0,
+            "requires_tool": True,
+            "occludes": False,
+            "sounds": "minecraft:stone",
+        },
+        "state_properties": {
+            "facing": {
+                "type": "enum",
+                "values": ["north", "south", "west", "east"],
+            },
+            "vertical": {"type": "boolean"},
+            "powered": {"type": "boolean"},
+        },
+        "default_state": {"facing": "north", "vertical": "false", "powered": "false"},
+        "shapes": {"default": [[0.0, 0.0, 0.0, 1.0, 0.125, 1.0]]},
+        "collision_shapes": {"default": [[0.0, 0.0, 0.0, 1.0, 0.125, 1.0]]},
+    }
+    write(
+        root,
+        f"data/{NS}/horizon/block/redstone_relay.json",
+        json.dumps(relay, indent=2) + "\n",
+    )
+
     # --- items -------------------------------------------------------------
     # The jar's items carry no components; the templates only set the stack
     # size and the look, and the look is overridden by the carried model.
@@ -313,14 +353,15 @@ def build(root: Path) -> None:
     # --- blockstates -------------------------------------------------------
     write(root, f"assets/{NS}/blockstates/connector.json", blockstate_connector("small"))
     write(root, f"assets/{NS}/blockstates/large_connector.json", blockstate_connector("large"))
-    # The accumulator's blockstate is the jar's own multipart over `top`/`bottom`
-    # (single / top / middle / bottom), carried verbatim: it names only this mod's
-    # models.
-    write(
-        root,
-        f"assets/{NS}/blockstates/modular_accumulator.json",
-        jar.read(f"assets/{NS}/blockstates/modular_accumulator.json").decode(),
-    )
+    # The accumulator's and the relay's blockstates are the jar's own: the accumulator's
+    # multipart over `top`/`bottom`, the relay's 16-variant table over
+    # `facing`/`powered`/`vertical`. Both name only this mod's models.
+    for block in VERBATIM_BLOCKSTATES:
+        write(
+            root,
+            f"assets/{NS}/blockstates/{block}.json",
+            jar.read(f"assets/{NS}/blockstates/{block}.json").decode(),
+        )
 
     # --- models and textures ----------------------------------------------
     for model in BLOCK_MODELS:
@@ -336,7 +377,12 @@ def build(root: Path) -> None:
             print(f"texture not in the jar: {member}", file=sys.stderr)
 
     # --- 26.3 item definitions --------------------------------------------
-    for item in ITEMS + ["connector", "large_connector", "modular_accumulator"]:
+    for item in ITEMS + [
+        "connector",
+        "large_connector",
+        "modular_accumulator",
+        "redstone_relay",
+    ]:
         write(
             root,
             f"assets/{NS}/items/{item}.json",

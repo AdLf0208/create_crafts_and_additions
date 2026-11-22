@@ -12,10 +12,12 @@ rewrite, see `FINDINGS.md`).
 MIT is licence rank 0 (permissive); the approval is still required.
 
 Status: **slice 1 implemented and delivered as a flat SDK package (mod API 0.2), version
-0.2.3** — the two connectors, wire links and the modular accumulator, with the jar's rates and
-connection rules, in one `createaddition.hmod` that carries the code *and* the content. (0.2.0
+0.2.4** — the two connectors, wire links and the modular accumulator, with the jar's rates and
+connection rules, plus the **redstone relay** that bridges one wire network into another while
+powered, in one `createaddition.hmod` that carries the code *and* the content. (0.2.0
 was the migration; 0.2.2 the tower; 0.2.3 the three review fixes, §
-[`## Review fixes — 0.2.3`](#review-fixes--023-pr-1526-2026-11-21).) The 0.1.0 `.hnmod` was retired by Horizon's mod-API merge (#16941); the migration is
+[`## Review fixes — 0.2.3`](#review-fixes--023-pr-1526-2026-11-21); 0.2.4 the relay, §
+[`## Slice 4 — the redstone relay (0.2.4)`](#slice-4--the-redstone-relay-024).) The 0.1.0 `.hnmod` was retired by Horizon's mod-API merge (#16941); the migration is
 [`## Migration to the SDK format`](#migration-to-the-sdk-format), and the 0.1.0 in-game evidence
 stays historical because no launcher exists at this pin (`## Gaps`).
 
@@ -215,9 +217,9 @@ The ruling above is about the Java mod; a migration must not carry **our** bugs 
 - **`small_light_connector`** (its 1 FE/t lamp consumption).
 - **`creative_energy`**, the e2e's source of last resort: the harness seeds an
   accumulator with `/createaddition energy` instead.
-- **`portable_energy_interface`**, **`redstone_relay`**, **`energy_meter`**,
+- **`portable_energy_interface`**, **`energy_meter`**,
   **`electric_pump`**, **`digital_adapter`** (the ComputerCraft bridge — CC is
-  an optional dependency and not ported).
+  an optional dependency and not ported). (`redstone_relay` moved out of this list in 0.2.4.)
 - **GUI/tooltips**: no goggles-style readout, no mode wrench, no comparator
   output on the accumulator, no `PhysicsBlock`/display source for the gauge.
 - **Crafting**: no recipes (`CONTENT.md`) — the blocks are creative-only until
@@ -831,5 +833,203 @@ longer hardcodes `/tmp`):
 | a saved shape outside 3×3×5 | **tested** — `a_saved_tower_beyond_the_limit_is_read_as_a_single_block` (dims 4×1, 1×6, 1000×1000, `i32::MAX`, 0, negative) + G6 |
 | a saved controller at the coordinate limit | **tested** — `a_saved_controller_past_the_coordinate_limit_does_not_overflow` (i64 box test; red was `attempt to add with overflow`) |
 | the upstream MIT notice in the package | **tested** — `tools/check_licence.py` (packed bytes == tree copy; `Copyright (c) 2024 MRH`) |
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review
+
+---
+
+## Slice 4 — the redstone relay (0.2.4)
+
+### The slice, and the gap line it comes from
+
+The port's own gap list named it directly:
+
+> **Gaps**: "**`portable_energy_interface`**, **`redstone_relay`**, **`energy_meter`**, …"
+
+**Choice.** The relay is the one remaining family in the jar's FE half that adds a *rule* rather
+than another buffer: upstream's `RedstoneRelayBlockEntity` is eight wire nodes in two ports (0–3
+input, 4–7 output) and `WireGraph.tickBridges` moves energy from the input network to the output
+network only while `RedstoneRelayBlock.POWERED` is set. It needs no Create kinetics, no GUI and no
+renderer, and it is the only family left that can be proved in game with a conservation assertion.
+
+**Tier fit.** `deep`: a block entity with two wire ports, a per-tick graph rule, a block-state gate
+driven by the game's redstone engine, saved in-flight energy and a carried blockstate/model set.
+No renderer, no dimension, no entity AI.
+
+**Upstream behaviour read** (repo `658a390b…`, analysis only): `WireNodeKind.RELAY` (`portOf`,
+`portCount`, `isBridge`, `isPowered`), `WireGraph.tickBridges` (`out.push(in.pull(bridge.demand))`),
+`RedstoneRelayBlock.updateState`/`calculateInputStrength`/`getAvailableNode`, and
+`RedstoneRelayBlockEntity.NODE_COUNT`, `isNodeInput`, `getMaxWireLength`.
+
+### What it does
+
+- **Eight nodes, two ports.** One `createaddition:redstone_relay` with a wire list: nodes 0–3 are the
+  input port, 4–7 the output port. A wire's port is decided by which half of the relay the other end
+  stands on (horizontal: the `facing` side is the output; vertical: the two halves swap, as
+  `getAvailableNode` has them). A full port refuses the wire instead of silently using the other.
+- **One block, two networks.** The relay's input port joins the record's input wire network and its
+  output port the output one; the two are never merged. Each network keeps its own pool where it
+  always did (its lowest member's compound).
+- **The gate.** Every pass, `update_relay` reads the two redstone sides (`relay_sides`:
+  above/below when vertical, across the long axis otherwise), takes the neighbour's signal and —
+  horizontal only — its strong power, and writes the block's own `powered` bit. Unpowered, the
+  bridge returns `RelayMove::default()` and no energy crosses; powered, it tops a 1,000 FE in-flight
+  buffer up from the input pool and gives the output pool what it holds, at most 1,000 FE a tick
+  either way. The in-flight buffer is the block's `energy` int, so a reload cannot lose it.
+- **Content.** The jar's own 16-variant blockstate (`facing`/`powered`/`vertical`), its three models,
+  its two stone textures and `connector.png`, the item definition, the loot table (26.3 dialect),
+  the block declaration (plate shape) and the lang keys.
+- **No capability.** Upstream's relay exposes no energy storage; the port declares no
+  `block_energy` for it. Its 1,000 FE is the bridge's in-flight buffer, readable with
+  `/createaddition info` but not insertable by a neighbour.
+
+### Red → green (TDD)
+
+The new rules went in first, against the pre-slice semantics (one port, one merged network, no
+redstone gate). `relay-red.log`:
+
+```
+thread 'network::tests::a_horizontal_relay_takes_on_the_far_side_and_gives_on_the_facing_side' (1792454) panicked at src/network.rs:2986:5:
+assertion `left == right` failed
+  left: Input
+ right: Output
+thread 'network::tests::a_vertical_relay_reads_above_and_below_and_swaps_its_ports' (1792465) panicked at src/network.rs:3014:5:
+assertion `left == right` failed
+  left: Input
+ right: Output
+thread 'network::tests::an_unpowered_relay_carries_nothing_even_with_energy_in_flight' (1792469) panicked at src/network.rs:3041:5:
+assertion `left == right` failed: the redstone signal is the gate: no bridge may move anything unpowered
+  left: RelayMove { into: 200, out: 1000 }
+ right: RelayMove { into: 0, out: 0 }
+thread 'network::tests::a_relay_splits_a_wire_run_into_an_input_and_an_output_network' (1792458) panicked at src/network.rs:3112:5:
+assertion `left == right` failed: the relay's two ports are separate networks, and the extra connector joins only the input one
+  left: [[PortMember { pos: [0, 0, 0], port: 0 }, PortMember { pos: [1, 0, 0], port: 0 }, PortMember { pos: [1, 0, 0], port: 1 }, PortMember { pos: [2, 0, 0], port: 0 }, PortMember { pos: [0, 0, 1], port: 0 }]]
+ right: [[PortMember { pos: [0, 0, 0], port: 0 }, PortMember { pos: [1, 0, 0], port: 0 }, PortMember { pos: [0, 0, 1], port: 0 }], [PortMember { pos: [1, 0, 0], port: 1 }, PortMember { pos: [2, 0, 0], port: 0 }]]
+thread 'network::tests::the_relay_rig_moves_energy_only_while_powered' (1792477) panicked at src/network.rs:3158:5:
+assertion `left == right` failed: an unpowered relay must not let one FE reach the sink
+  left: 18000
+ right: 0
+```
+
+`test result: FAILED. 61 passed; 5 failed`.
+
+Green: **66 passed, 0 failed** (`sdk-test.log`) — the ten new tests are the node/port split, the
+horizontal and vertical port choice, the full-port refusal, the gate, the 1,000 FE/t bridge with its
+buffer, either-side powering, the two-network split, the rig simulation and the placement yaw.
+
+### The harness defect this slice found (worth more than the slice)
+
+The first in-game run powered the relay, measured 6,040 FE into the sink, and then reported **no
+movement over the next 20 ticks** — the harness's, not the mod's. `relay_measure` held the read
+argument in a local `powered`, and `info` evals `parse_info.py`'s `powered=…` field; bash's **dynamic
+scoping** put that assignment into the caller's local, so the "restore the redstone block" branch
+saw `powered=0` and never ran. Renamed to `with_power` with a comment. The probe
+(`probe-relay.log`) shows the mod moving 99,980 → 0 into the sink across a power cycle.
+
+### The 0.2.4 ladder
+
+| Step | Command | Result |
+|---|---|---|
+| tests | `cargo test --offline` | **66 passed**, 0 failed (`sdk-test.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| formatting | `cargo fmt --check` | clean (`sdk-fmt.log`) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` | `target/horizon-mod/createaddition.hmod`, exit 0 (`sdk-build.log`) |
+| package, second build | same again | **byte-identical** (`cmp`) (`sdk-build-second.log`) |
+| registry check | `cargo horizon-mod check createaddition.hmod` | exit 0 (`sdk-check.log`) |
+| fits, campaign pin | `cargo horizon-mod fits createaddition.hmod --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a` | `0a875da  made for`, exit 0 (`sdk-fits-pin.log`) |
+| fits, another build | `… --build 0b14f8acfd97fa2c750e42795249dcc981178ca4` | `0b14f8a  fits`, exit 0 (`sdk-fits-other.log`) |
+| licence notice | `python3 tools/check_licence.py` | `ok … carries the upstream MIT notice verbatim`, exit 0 (`licence-notice.log`) |
+| data shape | `python3 tools/data_shape.py createaddition.hmod` | 4/4 loot tables in the 26.3 dialect |
+| content carry | `python3 tools/carry_content.py --check` | `assets/ and data/ match the jar carry` |
+| package verifier | `python3 ports/tools/verify-sdk-package.py createaddition` | **1/1** (`verify-sdk-package.log`) |
+
+Deliverable: **`createaddition.hmod`, 150,070 B, SHA-256
+`8b5b1c2250b1d884d0b35fdc90a1cff5d46e3de7354dd95640ed34572783eacd`**, **94 entries**, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too). 83 carried `assets/`+`data/` files (was 72).
+
+```
+createaddition 0.2.4 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  150070 bytes, SHA-256 8b5b1c2250b1d884d0b35fdc90a1cff5d46e3de7354dd95640ed34572783eacd, unsigned
+```
+
+```
+Create Crafts & Additions:
+0a875da  made for
+Create Crafts & Additions:
+0b14f8a  fits
+```
+
+The launcher rebuilt the game for this package (**`native-0a875da-39565764a7f0`**); the manifest
+version bump made the first build new too (`native-0a875da-93f70f80b6b6`), and a source-only change
+under the same version still recompiled, so the launcher fingerprints the package and not just its
+manifest.
+
+### In-game (`e2e-relay-default.log`, `PASS` + `EXIT:0`; `== I`)
+
+```
+== I: the redstone relay gates a wire between two accumulators ==
+  createaddition:redstone_relay[facing=east,powered=false,vertical=false]
+  Connector at 233,100,0: mode pull, buffer 0/1000 FE, links [], pool 0/0, demand 0, t=1386
+  Redstone Relay at 234,100,0: powered false, relay 0/1000 FE, input [(233,100,0)/0/copper], output [(236,100,0)/4/copper], pool 0/0, demand 0, t=1415
+  unpowered: source 99980, sink 0->0, pools 20/0/0, relay 0, total 100000->100000
+  createaddition:redstone_relay[facing=east,powered=true,vertical=false]
+  Modular Accumulator at 232,100,0: 92960/2000000 FE (t=1609)
+  Modular Accumulator at 237,100,0: 5040/2000000 FE (t=1616)
+  powered: source 92960->68940, sink 5040->29060, pools 2000/0/0, relay 0, total 100000->100000
+  the powered relay carried 24020 FE to the sink, conserved at 100000
+```
+
+The rig is `A(232) – C1(233) – relay(234, facing east) – C2(236, push) – B(237)` on its own stone
+pad; the relay reads `powered=false` from `ctl block` before the redstone block is placed and
+`powered=true` after it. **Unpowered, the sink does not move for 20 ticks** (the differential); with
+a redstone block on the relay's south side, 24,020 FE leaves the source and arrives at the sink in 20
+ticks, and source + sink + both network pools + the relay's buffer stay at 100,000.
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-relay-default.log` | `PASS` + `EXIT:0` | A–I: the whole earlier scenario plus the relay (unpowered ≠ powered), and all **four** carried loot tables drop one of themselves |
+| `e2e-relay-selftest.log` | `FAIL` + `EXIT:1` | `SELFTEST: the conservation assertion did not trip` (the suite's own counterfactual) |
+| `e2e-relay-gate-selftest.log` | `FAIL` + `EXIT:1` | `RELAY_SELFTEST: the unpowered relay moved the sink` — the relay gate assertion itself can fail |
+| `e2e-relay-control.log` | `FAIL` + `EXIT:1` | the package-less game has neither the item nor the relay block id |
+| `probe-relay.log` | `EXIT:0` | the probe: 99,980 → 0 across a power cycle, with the relay's saved `netReady/netNext/netDemand` and `energy` read from `/data get block` |
+
+`python3 ports/tools/check-e2e-logs.py createaddition createaddition-e2e --strict`:
+**logs=16 ok=16 missing-exit=0 bad-exit=0**.
+
+### Coverage added by this slice
+
+| family | status |
+|---|---|
+| the relay's eight nodes and two ports | **tested** — `a_relay_has_eight_nodes_in_two_ports`; in game the info line shows node 0 input, node 4 output |
+| a wire's port follows the peer's side (horizontal and vertical) | **tested** — `a_horizontal_relay_takes_on_the_far_side_and_gives_on_the_facing_side`, `a_vertical_relay_reads_above_and_below_and_swaps_its_ports` |
+| a full port refuses instead of borrowing the other | **tested** — `a_full_relay_port_refuses_rather_than_using_the_other_one` |
+| the redstone gate (unpowered moves nothing) | **tested** — `an_unpowered_relay_carries_nothing_even_with_energy_in_flight`, `any_signal_on_either_side_powers_the_relay`, `the_relay_rig_moves_energy_only_while_powered`; in game I's unpowered 20 ticks and `RELAY_SELFTEST` |
+| 1,000 FE/t through the bridge, in-flight buffer conserved | **tested** — `a_powered_relay_carries_a_thousand_fe_a_tick_and_keeps_the_rest`; in game I's `24020` conserved at `100000` |
+| two separate networks across one relay | **tested** — `a_relay_splits_a_wire_run_into_an_input_and_an_output_network`; in game I's per-network pools |
+| the block, its state and its `powered` bit | **tested** — `ctl block` reads `powered=false`/`true`; the port choice by side is in the link |
+| the relay's loot table | **tested** — H (`createaddition:redstone_relay: broke and dropped 1`) |
+| the relay's recipe | **not ported** — it needs `create:electron_tube` (`CONTENT.md`) |
+| a real player's placement yaw (flat vs vertical) | **unit-tested** (`a_player_facing_north_places_the_relay_east_west`); not exercised in game (the e2e places with `/setblock`) |
+| the comparator/ComputerCraft peripheral, goggles readout | **not ported** — CC is optional and not ported; the readout command is the interface |
+
+### Deviations of this slice (declared)
+
+1. **No energy capability on the relay.** Upstream's relay is a wire node, not a storage block; the
+   port likewise declares no `block_energy`, so the 1,000 FE buffer is reachable neither by a
+   neighbour's insert/extract nor by a connector mounted on the relay (which settles `none`). This is
+   faithful, and it is why the bridge is the only way energy crosses.
+2. **The port is chosen from the peer's side, not the click point.** The pin's `use_item_on` gives
+   the face, not the hit location, and the link command has no click at all: a relay's port is the
+   half the other wire end stands on. The count (4 + 4) and the refusal are the jar's.
+3. **The `powered` bit is refreshed in the level pass**, one tick after the neighbour change, instead
+   of upstream's two-tick scheduled `updateState`. The bit itself is the game's block state, so
+   `ctl block` and the jar's own on/off models read it.
+4. **A connector mounted on a relay settles `none`.** Upstream's `ConnectorMode.test` asks the
+   capability, and the relay has none; the port's `mounted_mode` returns `none` for `Kind::Relay`
+   instead of the pull a declared buffer would give.
+5. **Vertical relays are supported by the state and the port rule, not by the e2e.** The block can be
+   placed vertical (and `state_for_placement` does it on a side click), and the port mapping is
+   unit-tested; the in-game leg uses a flat relay so the rig is readable.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review

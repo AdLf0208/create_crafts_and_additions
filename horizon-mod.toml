@@ -1,16 +1,16 @@
 id = "createaddition"
 name = "Create Crafts & Additions"
-version = "0.2.3"
-description = """Create's electric bridge, FE half: the two connectors with their spools and wire links, the wire network that moves energy between them, and the modular accumulator with its 3x3x5 multiblock tower. Partial port: Create's kinetic network, the rotation half (motor, alternator, rolling mill, tesla coil) and the client half are not carried."""
+version = "0.2.4"
+description = """Create's electric bridge, FE half: the two connectors with their spools and wire links, the wire network that moves energy between them, the modular accumulator with its 3x3x5 multiblock tower, and the redstone relay that bridges one wire network into another while powered. Partial port: Create's kinetic network, the rotation half (motor, alternator, rolling mill, tesla coil) and the client half are not carried."""
 authors = ["MRH0 (upstream)", "Horizon native mod contributors"]
 # The SDK package (mod API 0.2): one flat .hmod carrying the code in src/ and the
-# connectors' and accumulator's blockstates, models, textures, items, loot tables and lang in
+# connectors', accumulator's and relay's blockstates, models, textures, items, loot tables and lang in
 # assets/ and data/. The id is the resource namespace and the only identity.
 api = "0.2"
 # "both" is the installation side, not the hook's: an integrated server belongs to the client
 # installation, so a single-player world or a LAN host needs both. A dedicated server is "server".
 side = "both"
-# Required by the manifest schema. This port declares its three blocks in data/
+# Required by the manifest schema. This port declares its four blocks in data/
 # (`data/createaddition/horizon/block/`); the field is the permission to add registry
 # entries, and the shared manifest's one allowed value.
 capabilities = ["registries"]

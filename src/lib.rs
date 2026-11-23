@@ -21,12 +21,16 @@ use mod_api::{
   RegistrationContext, RunModCommandEvent, ServerHost,
 };
 
-use crate::network::{ConnectorShape, Kind, LightShape, Queue, RelayShape, Ticker};
+use crate::network::{
+  AccumulatorShape, ConnectorShape, Kind, LightShape, Queue, RelayShape, Signals, Ticker,
+};
 
-/// The mod's session state: which of its block entities ticked this tick, per level.
+/// The mod's session state: which of its block entities ticked this tick, per level, and the
+/// accumulator's last comparator answer per block.
 #[derive(Default)]
 struct Mod {
   queue: Arc<Mutex<Queue>>,
+  signals: Arc<Mutex<Signals>>,
 }
 
 #[mod_api::horizon_mod]
@@ -62,6 +66,12 @@ impl Hooks for Mod {
     // The lamp is a connector with its own Part: the same placement and spool click, plus the
     // `light_emission` answer its `dynamic_light` declaration asks for.
     registrar.block_part(light, LightShape);
+    // The accumulator answers a comparator: `has_analog_output` says it may be asked and
+    // `analog_output` gives the tower's fill, which the level pass computes and records.
+    registrar.block_part(
+      accumulator,
+      AccumulatorShape::new(Arc::clone(&self.signals)),
+    );
 
     registrar.block_energy(&small, Kind::Small.buffer());
     registrar.block_energy(&large, Kind::Large.buffer());
@@ -95,7 +105,7 @@ impl Hooks for Mod {
       .lock()
       .expect("the createaddition tick queue lock is held for one drain")
       .take(event.level);
-    network::level_ticked(host, event.level, &queued);
+    network::level_ticked(host, event.level, &queued, &self.signals);
   }
 
   /// `/createaddition info|energy|link|unlink|mode`: the harness's readout and the controls the

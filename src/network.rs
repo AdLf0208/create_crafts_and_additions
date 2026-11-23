@@ -17,11 +17,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use mod_api::{
-  self, BlockEntityPart, BlockEntityTickEvent, BlockEntityTicksEvent, BlockKey, BlockPart, Command,
-  CommandArgumentValue, CommandInvocation, Compound, Direction, ENERGY, Host, HostBlockStates,
-  HostTransaction, InteractionResult, ItemKey, ItemPlace, ItemResource, ItemStack, LevelRef,
-  LightEmissionEvent, ModEnergyBuffer, ServerHost, StateConstraint, StateForPlacementEvent, Tag,
-  Text, UseItemOnEvent, move_energy,
+  self, AnalogOutputEvent, BlockEntityPart, BlockEntityTickEvent, BlockEntityTicksEvent, BlockKey,
+  BlockPart, Command, CommandArgumentValue, CommandInvocation, Compound, Direction, ENERGY,
+  HasAnalogOutputEvent, Host, HostBlockStates, HostTransaction, InteractionResult, ItemKey,
+  ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef, LightEmissionEvent, ModEnergyBuffer,
+  NeighbourUpdate, ServerHost, StateConstraint, StateForPlacementEvent, Tag, Text, UseItemOnEvent,
+  move_energy,
 };
 
 use crate::runtime::{
@@ -796,6 +797,46 @@ impl BlockPart for LightShape {
   }
 }
 
+/// The accumulator's comparator half: `has_analog_output` says a comparator may ask, and
+/// `analog_output` answers the fill the pass last computed for its tower.
+pub(crate) struct AccumulatorShape {
+  signals: Arc<Mutex<Signals>>,
+}
+
+impl AccumulatorShape {
+  pub(crate) fn new(signals: Arc<Mutex<Signals>>) -> Self {
+    Self { signals }
+  }
+}
+
+#[mod_api::horizon_part]
+impl BlockPart for AccumulatorShape {
+  /// `ModularAccumulatorBlock.hasAnalogOutputSignal` answers `true` for every state of the
+  /// block, so the comparator always asks (an empty tower then answers 0).
+  fn has_analog_output(&self, level: &dyn LevelHost, event: &mut HasAnalogOutputEvent) {
+    if level.state_block(event.state) == Some(ACCUMULATOR) {
+      event.output = true;
+    }
+  }
+
+  /// `ModularAccumulatorBlock.getAnalogOutputSignal` asks the controller's `getFillState()` and
+  /// maps it with `ComparatorUtil.fractionToRedstoneLevel`. The tower's pool is read in the pass
+  /// (a level host cannot open a block entity), so this reports what that pass computed; the
+  /// pass tells the comparators when the answer changed.
+  fn analog_output(&self, _: &dyn LevelHost, event: &mut AnalogOutputEvent) {
+    let dimension = event.dimension.key().id();
+    let pos = [event.pos.x, event.pos.y, event.pos.z];
+    let answer = self
+      .signals
+      .lock()
+      .expect("the createaddition comparator answers lock is held for one lookup")
+      .value(dimension, pos);
+    if let Some(level) = answer {
+      event.output = level;
+    }
+  }
+}
+
 /// The spool click both wire parts share: the empty spool takes the clicked block's wires
 /// out, a wire spool's first click selects it and its second lays the wire.
 fn spool_click(
@@ -1231,7 +1272,12 @@ fn reciprocal_wires(
 
 /// Settle each queued connector's placement mode, let the queued accumulators feed the blocks
 /// above and below, then run every wire network among the queued connectors.
-pub(crate) fn level_ticked(host: &mut dyn ServerHost, level: LevelRef, queued: &BTreeSet<Pos>) {
+pub(crate) fn level_ticked(
+  host: &mut dyn ServerHost,
+  level: LevelRef,
+  queued: &BTreeSet<Pos>,
+  signals: &Mutex<Signals>,
+) {
   if queued.is_empty() {
     return;
   }
@@ -1291,6 +1337,53 @@ pub(crate) fn level_ticked(host: &mut dyn ServerHost, level: LevelRef, queued: &
   for (pos, saved) in &blocks {
     if saved.kind == Kind::Light {
       light_clock(host, level, *pos, saved, paid.contains(pos));
+    }
+  }
+  // The comparator answer is the fill *after* this tick's moves, so it is the last thing the
+  // pass does: every accumulator block answers its tower's fraction, and a changed answer tells
+  // the comparators beside it to read again.
+  note_tower_signals(host, level, &blocks, &towers, signals);
+}
+
+/// Record each accumulator's comparator answer for the hook and tell the comparators beside a
+/// block whose answer changed (`Level.updateNeighbourForOutputSignal`). `analog_output` is asked
+/// with a level host, which cannot open a block entity, so the answer is computed here, from the
+/// charges the pass just wrote.
+fn note_tower_signals(
+  host: &mut dyn ServerHost,
+  level: LevelRef,
+  blocks: &[(Pos, Saved)],
+  towers: &BTreeMap<Pos, Tower>,
+  signals: &Mutex<Signals>,
+) {
+  let dimension = host.dimension().to_owned();
+  let changed: Vec<Pos> = {
+    // The lock is never held across `update_neighbors`: the comparator that update wakes asks
+    // `analog_output`, which takes the same lock.
+    let mut answers = signals
+      .lock()
+      .expect("the createaddition comparator answers lock is held for one pass");
+    let mut changed = Vec::new();
+    for (pos, saved) in blocks {
+      if saved.kind != Kind::Accumulator {
+        continue;
+      }
+      let Some(tower) = towers.get(pos).copied() else {
+        continue;
+      };
+      if answers.note(
+        &dimension,
+        *pos,
+        tower_signal(tower, tower_amount(host, level, tower)),
+      ) {
+        changed.push(*pos);
+      }
+    }
+    changed
+  };
+  for pos in changed {
+    if let Some(state) = level.block_state(host, pos) {
+      let _ = level.update_neighbors(host, pos, state, NeighbourUpdate::OutputSignal);
     }
   }
 }
@@ -1894,6 +1987,66 @@ fn drain_tower(charges: &mut [(Pos, i32)], amount: i32) -> i32 {
     }
   }
   taken
+}
+
+// --- the accumulator's comparator output ----------------------------------
+
+/// `ComparatorUtil.fractionToRedstoneLevel`, verbatim from the parent's source
+/// (`com.simibubi.create.foundation.blockEntity.ComparatorUtil`, Create 1.21.1):
+/// `floor(clamp(frac * 14 + (frac > 0 ? 1 : 0), 0, 15))`. The extra 1 is what makes a container
+/// just above empty read 1 and half full read 8 rather than 7.
+///
+/// The fraction itself is the jar's **float** (`ModularAccumulatorBlockEntity.getFillState()`
+/// returns `(float) energyStored / capacity`), widened to the `double` this function takes, so
+/// the f32 division is kept: at a 45-block tower's 90,000,000 FE the float and the tidy double
+/// disagree on 18 exact charges.
+fn fraction_to_level(stored: i32, capacity: i32) -> i32 {
+  if capacity <= 0 {
+    return 0;
+  }
+  let fraction = f64::from(stored.max(0) as f32 / capacity as f32);
+  let extra = if fraction > 0.0 { 1.0 } else { 0.0 };
+  let level = (fraction * 14.0 + extra).clamp(0.0, 15.0).floor();
+  i32::try_from(level as i64).unwrap_or(15)
+}
+
+/// The signal a tower gives a comparator: its whole pool over its whole capacity, which is
+/// upstream's `getFillState()` on the controller (`energyCapability.getEnergyStored()` /
+/// `getMaxEnergyStored()`). A 1x3 tower of 6,000,000 FE at half charge therefore reads 8, where
+/// one block holding 3,000,000 would read 15.
+fn tower_signal(tower: Tower, stored: i32) -> i32 {
+  fraction_to_level(stored, tower.capacity())
+}
+
+/// The comparator answer each accumulator block last gave, keyed by the dimension's id and then
+/// the block position. `analog_output` is asked with a level host only, which cannot read a block
+/// entity, so the pass computes the answer from the saved charges and this is what the hook
+/// reads back (the same split `functionalstorage` uses at this pin).
+///
+/// One entry per placed accumulator; a broken block's entry is left behind (it is the answer the
+/// block would still give, and a reloaded chunk's comparator may ask before the next pass runs).
+#[derive(Default)]
+pub(crate) struct Signals {
+  levels: HashMap<String, HashMap<Pos, i32>>,
+}
+
+impl Signals {
+  /// Record `value` as `pos`'s answer. `true` when it differs from the last one, which is when
+  /// the comparators beside the block must be told to read again (`Level.updateNeighbourForOutputSignal`);
+  /// a first answer counts as a change.
+  fn note(&mut self, dimension: &str, pos: Pos, value: i32) -> bool {
+    let previous = self
+      .levels
+      .entry(dimension.to_owned())
+      .or_default()
+      .insert(pos, value);
+    previous != Some(value)
+  }
+
+  /// The last answer for `pos`, until the pass overwrites it.
+  fn value(&self, dimension: &str, pos: Pos) -> Option<i32> {
+    self.levels.get(dimension)?.get(&pos).copied()
+  }
 }
 
 /// The wire ports a block offers: a connector's one, a relay's two (its saved wires split by
@@ -3478,5 +3631,111 @@ mod tests {
     assert_eq!(clamped(-5, 1_000), 0);
     assert_eq!(clamped(400, 1_000), 400);
     assert_eq!(clamped(9_999, 1_000), 1_000);
+  }
+
+  #[test]
+  fn the_comparator_level_is_the_jars_fraction_mapping() {
+    // `ComparatorUtil.fractionToRedstoneLevel` (read from the parent's source): a 1x3 tower is
+    // 6,000,000 FE, and the answer is `floor(frac * 14 + (frac > 0 ? 1 : 0))`, clamped to 15.
+    let capacity = 6 * ACCUMULATOR_CAPACITY;
+    assert_eq!(fraction_to_level(0, capacity), 0, "an empty tower reads 0");
+    assert_eq!(
+      fraction_to_level(capacity / 2, capacity),
+      8,
+      "half full is 8, not 7: the jar's +1 (a 0-vs-15 run would read 15)"
+    );
+    assert_eq!(
+      fraction_to_level(1, capacity),
+      1,
+      "any charge at all reads 1"
+    );
+    assert_eq!(
+      fraction_to_level(capacity - 1, capacity),
+      14,
+      "only a tower filled exactly to its capacity reads 15"
+    );
+    assert_eq!(fraction_to_level(capacity, capacity), 15, "full reads 15");
+    assert_eq!(
+      fraction_to_level(capacity + 5, capacity),
+      15,
+      "a save past its capacity is clamped, not wrapped"
+    );
+    // The 1/14 boundary on one block's own 2,000,000: `floor(f * 14)` steps at 142,857.
+    assert_eq!(fraction_to_level(142_857, ACCUMULATOR_CAPACITY), 1);
+    assert_eq!(fraction_to_level(142_858, ACCUMULATOR_CAPACITY), 2);
+  }
+
+  #[test]
+  fn the_fraction_is_the_jars_single_precision_division() {
+    // Upstream's `getFillState()` is a `float`: `(float) stored / capacity` is one f32 division,
+    // and only its result is widened to the `double` that the parent's
+    // `fractionToRedstoneLevel(double)` takes. A 3x3x5 tower is 90,000,000 FE, whose f32 ulp is
+    // 8, and at 19,285,714 FE the jar's float division gives `frac * 14` just past 3 (level 4)
+    // where the tidy double gives just under it (level 3). Matching the jar means the float.
+    assert_eq!(fraction_to_level(19_285_714, 90_000_000), 4);
+    assert_eq!(
+      fraction_to_level(45_000_000, 90_000_000),
+      8,
+      "a half-full 45-block tower is still 8"
+    );
+  }
+
+  #[test]
+  fn a_towers_level_uses_the_towers_capacity_not_one_blocks() {
+    let tower = Tower {
+      controller: [4, 64, 9],
+      width: 1,
+      height: 3,
+    };
+    assert_eq!(
+      tower_signal(tower, 3_000_000),
+      8,
+      "a half-full 1x3 tower reads the tower's fraction, not a block's"
+    );
+    assert_eq!(
+      tower_signal(Tower::single([4, 64, 9]), 3_000_000),
+      15,
+      "the same charge in one block is past its 2,000,000 capacity"
+    );
+    assert_eq!(tower_signal(tower, 0), 0);
+    assert_eq!(tower_signal(tower, tower.capacity()), 15);
+  }
+
+  #[test]
+  fn a_comparator_is_told_only_when_its_answer_changes() {
+    let mut signals = Signals::default();
+    let pos = [10, 100, 0];
+    assert_eq!(
+      signals.value("minecraft:the_end", pos),
+      None,
+      "no answer before the pass has read the block"
+    );
+    assert!(
+      signals.note("minecraft:the_end", pos, 8),
+      "the first answer is a change, so the comparator is told"
+    );
+    assert_eq!(signals.value("minecraft:the_end", pos), Some(8));
+    assert!(
+      !signals.note("minecraft:the_end", pos, 8),
+      "the same answer tells nobody, so a settled tower costs no redstone update"
+    );
+    assert!(
+      signals.note("minecraft:the_end", pos, 15),
+      "a new answer is a change"
+    );
+    assert!(
+      signals.note("minecraft:overworld", pos, 0),
+      "another dimension's block at the same coordinates is a first answer"
+    );
+    assert!(
+      signals.note("minecraft:the_end", [11, 100, 0], 8),
+      "another position is a first answer"
+    );
+    assert_eq!(signals.value("minecraft:overworld", pos), Some(0));
+    assert_eq!(
+      signals.value("minecraft:the_end", pos),
+      Some(15),
+      "the tower's own answer is kept"
+    );
   }
 }

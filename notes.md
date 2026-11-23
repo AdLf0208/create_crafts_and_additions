@@ -11,15 +11,17 @@ rewrite, see `FINDINGS.md`).
 **LOCAL-ONLY** until the maintainer approves publishing (ARCHITECTURE.md §8).
 MIT is licence rank 0 (permissive); the approval is still required.
 
-Status: **slice 1 implemented and delivered as a flat SDK package (mod API 0.2), version
-0.2.5** — the two connectors, wire links and the modular accumulator, with the jar's rates and
+Status: **slice 6 implemented and delivered as a flat SDK package (mod API 0.2), version
+0.2.6** — the two connectors, wire links and the modular accumulator, with the jar's rates and
 connection rules, plus the **redstone relay** that bridges one wire network into another while
-powered and the **small light connector** whose lamp draws 1 FE a tick and lights while its network
-pays it, in one `createaddition.hmod` that carries the code *and* the content. (0.2.0
+powered, the **small light connector** whose lamp draws 1 FE a tick and lights while its network
+pays it, and the accumulator's **comparator output** (the jar's fill fraction), in one
+`createaddition.hmod` that carries the code *and* the content. (0.2.0
 was the migration; 0.2.2 the tower; 0.2.3 the three review fixes, §
 [`## Review fixes — 0.2.3`](#review-fixes--023-pr-1526-2026-11-21); 0.2.4 the relay, §
 [`## Slice 4 — the redstone relay (0.2.4)`](#slice-4--the-redstone-relay-024); 0.2.5 the lamp, §
-[`## Slice 5 — the small light connector (0.2.5)`](#slice-5--the-small-light-connector-025).) The
+[`## Slice 5 — the small light connector (0.2.5)`](#slice-5--the-small-light-connector-025); 0.2.6
+the comparator, § [`## Slice 6 — the accumulator's comparator output (0.2.6)`](#slice-6--the-accumulators-comparator-output-026).) The
 0.1.0 `.hnmod` was retired by Horizon's mod-API merge (#16941); the migration is
 [`## Migration to the SDK format`](#migration-to-the-sdk-format), and the 0.1.0 in-game evidence
 stays historical (`## Gaps`).
@@ -225,8 +227,9 @@ The ruling above is about the Java mod; a migration must not carry **our** bugs 
 - **`portable_energy_interface`**, **`energy_meter`**,
   **`electric_pump`**, **`digital_adapter`** (the ComputerCraft bridge — CC is
   an optional dependency and not ported). (`redstone_relay` moved out of this list in 0.2.4.)
-- **GUI/tooltips**: no goggles-style readout, no mode wrench, no comparator
-  output on the accumulator, no `PhysicsBlock`/display source for the gauge.
+- **GUI/tooltips**: no goggles-style readout, no mode wrench, no `PhysicsBlock`/display source for
+  the gauge. (The accumulator's comparator output moved out of this line in 0.2.6, §
+  [`## Slice 6`](#slice-6--the-accumulators-comparator-output-026).)
 - **Crafting**: no recipes (`CONTENT.md`) — the blocks are creative-only until
   the parent's items exist.
 - **Festive wire and spool**, the iron wire, and the electrum/brass/copper metal
@@ -648,7 +651,7 @@ bad-exit=0**.
 | separated accumulators stay singles | **tested** — G5 (2,000,000 cap, neighbours 0) |
 | each block's loot table | **tested** — H (each of the three drops 1 when broken) |
 | recipes | **not ported** — every one needs `create:` items (`CONTENT.md`) |
-| comparator output, goggles/display source | **not ported** — `analog_output` exists at this pin; a later slice |
+| comparator output, goggles/display source | **comparator closed in 0.2.6** — § [`## Slice 6`](#slice-6--the-accumulators-comparator-output-026); goggles/display source **not ported** (client half) |
 
 ### Deviations of this slice (declared)
 
@@ -1267,5 +1270,236 @@ dark. This is upstream's own hysteresis, not a port choice.
 4. **`dynamic_light` instead of a per-state emission.** The content schema has no per-state light, so
    the block declares `dynamic_light: true` and `LightShape::light_emission` answers from the state.
    That hook is new at this pin (see the `fits` finding above).
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review
+
+---
+
+## Slice 6 — the accumulator's comparator output (0.2.6)
+
+### The slice, and the gap line it comes from
+
+The port's own coverage table named it, and the 0.2.5 report proposed it as the next slice:
+
+> **Coverage, slice 2**: "comparator output, goggles/display source | **not ported** —
+> `analog_output` exists at this pin; a later slice"
+
+**Choice.** The accumulator's comparator answer is the last family of the FE half's *behaviour* that
+the jar has and the port does not: upstream's `ModularAccumulatorBlock` tells a comparator yes and
+then answers with the tower's fill, so a tower is readable by the redstone the game already has (a
+display lamp, a hatch, a level sensor). It needs no Create kinetics, no GUI and no renderer, and it
+is provable in game on the **world's own** state — the wire's `power` — not on a mod readout.
+
+**Tier fit.** `deep`: a block Part on the `has_analog_output`/`analog_output` hook pair, a per-level
+answer map, a neighbour-signal update that has to be told only when the number changes, and an answer
+computed from a multiblock pool rather than a block's own buffer. No renderer, no dimension, no
+entity AI; nothing beyond the row.
+
+**Upstream behaviour read** (repo `658a390b…`, analysis only; the parent's mapping read from
+`Creators-of-Create/Create` `mc1.21.1/dev`):
+
+- `ModularAccumulatorBlock.hasAnalogOutputSignal(state)` → `true` for every state.
+- `ModularAccumulatorBlock.getAnalogOutputSignal(state, level, pos)` →
+  `getBlockEntityOptional(level, pos).map(ModularAccumulatorBlockEntity::getControllerBE)
+  .map(te -> ComparatorUtil.fractionToRedstoneLevel(te.getFillState())).orElse(0)` — so **any**
+  part of a tower answers the controller's fill.
+- `ModularAccumulatorBlockEntity.getFillState()` →
+  `(float) energyCapability.getEnergyStored() / energyCapability.getMaxEnergyStored()`.
+- `com.simibubi.create.foundation.blockEntity.ComparatorUtil.fractionToRedstoneLevel(double frac)` →
+  `Mth.floor(Mth.clamp(frac * 14 + (frac > 0 ? 1 : 0), 0, 15))`. The `+1` is why a container just
+  above empty reads **1** and half full reads **8**, not 7 — the middle value the e2e pins.
+
+### What it does
+
+- **The pair, on the accumulator's block key.** `AccumulatorShape` (a `BlockPart`) answers
+  `has_analog_output` true for the accumulator's states and `analog_output` with the block's last
+  recorded answer, so a comparator asks only for our block and gets the tower's fraction.
+- **Computed in the pass, read back by the hook.** `analog_output` is asked with a `LevelHost`,
+  which cannot open a block entity (`HostBlockStates` is all it offers), and the hook's own doc says
+  not to change the world there. The level pass already reads every tower's charges after its moves,
+  so it computes `tower_signal(tower, amount)` for every queued accumulator block, records it in
+  `Signals` keyed by the dimension id and the block position, and — only when the number changed —
+  calls `level.update_neighbors(host, pos, state, NeighbourUpdate::OutputSignal)`, which is vanilla's
+  `updateNeighbourForOutputSignal`: the comparators beside the block read again. A settled tower
+  therefore costs no redstone update at all.
+- **The jar's arithmetic, including its float.** `fraction_to_level` is the parent's formula
+  verbatim, and the fraction is the jar's `float` division (`getFillState()`) widened to the double
+  the parent's method takes — kept, not tidied: at a 45-block tower's 90,000,000 FE the float and a
+  double disagree on 18 exact charges.
+- **No content change.** The family is a block Part and a rule; the package's `assets/`/`data/` are
+  the same 108 entries as 0.2.5's.
+
+### Red → green (TDD)
+
+The rules went in first, against the pre-slice code (no answer at all: `analog_output` did not
+exist, and the two helpers were stubs). `comparator-red.log`, verbatim:
+
+```
+thread 'network::tests::the_comparator_level_is_the_jars_fraction_mapping' (1746826) panicked at src/network.rs:3533:5:
+assertion `left == right` failed: half full is 8, not 7: the jar's +1 (a 0-vs-15 run would read 15)
+  left: 15
+ right: 8
+thread 'network::tests::a_towers_level_uses_the_towers_capacity_not_one_blocks' (1746816) panicked at src/network.rs:3562:5:
+assertion `left == right` failed: a half-full 1x3 tower reads the tower's fraction, not a block's
+  left: 15
+ right: 8
+thread 'network::tests::a_comparator_is_told_only_when_its_answer_changes' (1746795) panicked at src/network.rs:3585:5:
+the first answer is a change, so the comparator is told
+test result: FAILED. 72 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+The **fidelity** rule had its own red (`comparator-fraction-red.log`), taken by reverting the f32
+step to the double one after the three rules above had gone green, then restoring the fix:
+
+```
+test network::tests::the_fraction_is_the_jars_single_precision_division ... FAILED
+thread 'network::tests::the_fraction_is_the_jars_single_precision_division' (936759) panicked at src/network.rs:3675:5:
+  left: 3
+ right: 4
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 75 filtered out
+```
+
+**A test bug the red surfaced, not a code bug.** `a_comparator_is_told_only_when_its_answer_changes`
+asserted `!note(...)` for "another dimension's block at the same coordinates **is a first answer**"
+and for "another position is a first answer". A first answer counts as a change by the map's own
+contract, so the two assertions were inverted; they were corrected to `note(...) == true` (the
+`value(...)` expectations beside them were already right). Nothing in the shipped rule changed.
+
+Green: **76 passed, 0 failed** (`sdk-test.log`, regenerated for 0.2.6) — the eight new tests are the
+fraction mapping (0, 1, the 8 midpoint, 14, 15, a save past capacity, both sides of the 1/14 step),
+the f32 fidelity case, the tower-vs-block fraction, the change detection, and the `Signals` map.
+
+### The geometry, measured rather than assumed (`e2e-comparator-probe.log`)
+
+A comparator's `facing` is the side it **reads**; it drives the block behind it. The probe placed one
+comparator on each of the two horizontal sides of a full tower, each with its own wire:
+
+```
+  probe: comparatorok facing=north, wire z=2 power=15
+  probe: comparatorok facing=south, wire z=-2 power=15
+```
+
+Both mirror orientations answer 15, and each drives the wire on the opposite side of `facing`, which
+is the geometry the default run then asserts. `CMP_ONLY=1` keeps the probe runnable.
+
+### The 0.2.6 ladder
+
+| Step | Command | Result |
+|---|---|---|
+| tests | `cargo test --offline` | **76 passed**, 0 failed (`sdk-test.log`, regenerated for 0.2.6) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| formatting | `cargo fmt --check` | clean (`sdk-fmt.log`; `src/runtime.rs` unchanged, `03721ca4…f962`) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` | `target/horizon-mod/createaddition.hmod`, exit 0 (`comparator-build-1.log`) |
+| package, second build | same again | **byte-identical** (`cmp`) (`comparator-build-2.log`) |
+| registry check | `cargo horizon-mod check createaddition.hmod` | exit 0 (`comparator-check.log`) |
+| fits, campaign pin | `cargo horizon-mod fits … --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a` | `0a875da  made for`, exit 0 (`comparator-fits-pin.log`) |
+| fits, another build | `… --build 0b14f8acfd97fa2c750e42795249dcc981178ca4` | **`does not fit: 1 item changed — the method BlockStates::light_emission (removed)`**, exit 1 (`comparator-fits-other.log`) — 0.2.5's finding, unchanged |
+| data shape | `python3 tools/data_shape.py createaddition.hmod` | 5/5 loot tables in the 26.3 dialect |
+| content carry | `python3 tools/carry_content.py --check` | `assets/ and data/ match the jar carry` |
+| licence notice | `python3 tools/check_licence.py` | `ok … carries the upstream MIT notice verbatim` |
+| package verifier | `python3 ports/tools/verify-sdk-package.py createaddition` | **1/1** (`verify-sdk-package.log`) |
+
+The second `fits` run is red for 0.2.5's reason, not this slice's: the lamp's `light_emission`
+surface does not exist at `0b14f8a`, so no earlier build can carry the package. The comparator
+itself uses no new surface — `has_analog_output`/`analog_output` and
+`NeighbourUpdate::OutputSignal` are at the pin (the same hook pair other ports at this pin answer).
+
+Deliverable: **`createaddition.hmod`, 172,461 B, SHA-256
+`9daebe6da2536041f42f76e2b7f169ee2d243ae60fbbc0312f719508b6e756f4`**, **108 entries**, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too).
+
+```
+createaddition 0.2.6 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  172461 bytes, SHA-256 9daebe6da2536041f42f76e2b7f169ee2d243ae60fbbc0312f719508b6e756f4, unsigned
+```
+
+```
+Create Crafts & Additions:
+0a875da  made for
+Create Crafts & Additions:
+0b14f8a  does not fit: 1 item changed
+    the method `BlockStates::light_emission` (removed)
+```
+
+The launcher rebuilt the game for this package (`native-0a875da-fa83417f8a7d`,
+`Compiling createaddition (1 of 1)`): the manifest bump is again what forces the recompile.
+
+### In-game (`e2e-comparator-default.log`, `PASS` + `EXIT:0`; `== K`)
+
+The rig is a formed 1×3 tower at `260,100,0` (6,000,000 FE), a comparator at `260,101,1` whose
+`facing` side touches the tower's middle block, and a redstone wire at `260,101,2`; the differential
+is the same comparator at `263,101,1` reading a stone block at `263,101,0`, with its own wire at
+`263,101,2`. The player stands on the pad, so every read is within reach.
+
+```
+== K: the accumulator answers a comparator with the jar's fraction ==
+  Modular Accumulator at 260,100,0: 0/6000000 FE, tower 1x3 at 260,100,0 (t=2293)
+  -- an empty 1x3 tower reads power=0
+  an empty tower: redstone_wire at 260,101,2 power=0
+  -- 3,000,000 of 6,000,000 reads the jar's 8 (7 is the un-offset fraction, 15 a 0/15 mapping)
+  Modular Accumulator at 260,100,0: 3000000/6000000 FE, tower 1x3 at 260,100,0 (t=2341)
+  a half-full tower: redstone_wire at 260,101,2 power=8
+  -- a full tower reads power=15
+  Modular Accumulator at 260,100,0: 6000000/6000000 FE, tower 1x3 at 260,100,0 (t=2365)
+  a full tower: redstone_wire at 260,101,2 power=15
+  -- the differential: the same comparator rig behind a stone block reads 0
+  a stone block: redstone_wire at 263,101,2 power=0
+  -- emptied with /createaddition energy, the wire falls back to 0
+  emptied: redstone_wire at 260,101,2 power=0
+```
+
+Why these can fail: the **middle** seed is the jar's own midpoint — a mapping that answered 15 for
+any charge (or 7 from the un-offset fraction, or 0 from `stored / capacity * 15`) fails `power=8`;
+the stone rig reads 0 in the same tick the tower reads 15, so an implementation that answered its
+fraction for every block would fail there; and the emptied step moves the wire back to 0, which is
+the assertion `COMPARATOR_SELFTEST=1` inverts (it demands the wire have stayed at 15) — that leg
+fails, `FAIL: COMPARATOR_SELFTEST: emptying the tower moved the wire from power=15 to power=0, so
+the assertion is alive` (`e2e-comparator-selftest.log`, `EXIT:1`).
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-comparator-default.log` | `PASS` + `EXIT:0` | A–J unchanged, plus **K**: the wire reads 0, 8 and 15 for the three seeds, the stone rig reads 0 while the tower reads 15, and emptying the tower returns the wire to 0 |
+| `e2e-comparator-selftest.log` | `FAIL` + `EXIT:1` | K's own counterfactual (`COMPARATOR_SELFTEST`) |
+| `e2e-comparator-suite-selftest.log` | `FAIL` + `EXIT:1` | the suite's conservation counterfactual, still alive (`SELFTEST`) |
+| `e2e-comparator-control.log` | `FAIL` + `EXIT:1` | a game without the package has no accumulator item, so the ids come from it |
+| `e2e-comparator-probe.log` | `PASS` + `EXIT:0` | the comparator geometry: both mirror orientations, each driving the wire behind it |
+
+`python3 ports/tools/check-e2e-logs.py createaddition createaddition-e2e --strict`:
+**logs=25 ok=25 missing-exit=0 bad-exit=0**.
+
+### Coverage added by this slice
+
+| family | status |
+|---|---|
+| the comparator is told the accumulator has an output | **tested** — in game `ctl block` on the wire is non-empty at 0 FE; the answer is asked for by the game only because `has_analog_output` said yes |
+| the jar's fraction mapping (0, 1, 8 at half, 15 at full, the 1/14 step) | **tested** — `the_comparator_level_is_the_jars_fraction_mapping`; in game `power=0`, `power=8`, `power=15` |
+| the fraction is the jar's f32 division | **tested** — `the_fraction_is_the_jars_single_precision_division` (red was 3 vs 4 at 19,285,714/90,000,000) |
+| a tower answers its whole pool, not one block's charge | **tested** — `a_towers_level_uses_the_towers_capacity_not_one_blocks`; in game 3,000,000 of 6,000,000 reads 8 where a block's fraction would read 15 |
+| comparators are told only when the answer changed | **tested** — `a_comparator_is_told_only_when_its_answer_changes`; in game a settled tower's wire does not flicker (each seed's step is one change) |
+| a block that is not ours answers nothing | **tested** — in game the same rig behind `minecraft:stone` reads `power=0` |
+| emptying and refilling follows | **tested** — in game the emptied tower takes the wire to 0; `COMPARATOR_SELFTEST` proves that step can fail |
+| goggles / display source for the gauge | **not ported** — the client half (a renderer), outside the tier's server shape |
+
+### Deviations of this slice (declared)
+
+1. **The answer is computed in the level pass and read back by the hook.** `analog_output` gets a
+   level host that cannot open a block entity, and its doc forbids changing the world there, so the
+   pass records the number and the hook answers it. A comparator therefore sees a change one tick
+   after the charge moved, and a block placed and destroyed between two passes can answer once from
+   the map (a reloaded chunk's comparator may ask before the first pass — the entry is kept
+   deliberately for that case).
+2. **The map is keyed by dimension id and position, and it is not pruned on break.** One entry per
+   placed accumulator; a broken block's answer stays until the process ends. It is the answer the
+   block would give, and pruning needs a break hook this Part does not have.
+3. **Every member answers; upstream answers through the controller.** Upstream's
+   `getAnalogOutputSignal` maps the block entity to `getControllerBE()`, so a non-controller part
+   reports the controller's fill; here each block of the tower answers the tower's fill directly.
+   The number is the same; the e2e reads the middle block to pin it.
+4. **The f32 fraction is deliberate.** The jar's `getFillState()` is single precision; the port keeps
+   that step so the two agree bit for bit, including the 18 charges of a 45-block tower where a
+   double would read one level low. A test pins it.
+5. **The comparator's state is not touched.** The port answers the vanilla `getAnalogOutputSignal`
+   path only; the comparator block itself is vanilla, so its model, mode and delay are the game's.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review

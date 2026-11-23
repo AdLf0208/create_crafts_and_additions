@@ -1,10 +1,10 @@
-# Create Crafts & Additions — Horizon port (slices 1–5: the FE half)
+# Create Crafts & Additions — Horizon port (slices 1–6: the FE half)
 
 A native Horizon port of **Create Crafts & Additions 1.7.2** (`MRH0/createaddition`, **MIT**): the
 electric half of the mod — two connectors, wire links and the modular accumulator, including the
-jar's 3×3×5 accumulator multiblock, the redstone relay that bridges one wire network into another
-while powered, and the small light connector whose lamp draws one FE a tick and lights while its
-network pays it — with the jar's own transfer rates.
+jar's 3×3×5 accumulator multiblock and its comparator output, the redstone relay that bridges one
+wire network into another while powered, and the small light connector whose lamp draws one FE a
+tick and lights while its network pays it — with the jar's own transfer rates.
 
 **LOCAL-ONLY** until the maintainer approves publishing (ARCHITECTURE.md §8). MIT is licence rank 0
 (permissive); the approval is still required.
@@ -58,6 +58,9 @@ Each block drops itself when mined with a pickaxe (its own 26.3 loot table, and 
   whole pool**, so a connector on any part drains the tower. The jar's `top`/`bottom` state bits
   decide which layer outputs above and which below (`tickOutput`), so a tower never feeds itself;
   a single block keeps both bits and feeds both ways.
+- The accumulator **answers a comparator** with its tower's fill
+  (`ComparatorUtil.fractionToRedstoneLevel(getFillState())`): 0 empty, **8** at half — the jar's
+  `* 14 + 1` midpoint — and 15 full, so a comparator on any part of the tower reads the whole pool.
 - The **redstone relay** has eight wire nodes in two ports (0–3 input, 4–7 output). Its input port
   joins one wire network and its output port another, and energy crosses only while the block's
   `powered` bit is set — a redstone block or wire on either side of its long axis sets it, at most
@@ -84,9 +87,9 @@ reply repeats as ` [#tag]` so a harness can tell answers apart. The readout text
 ## Layout
 
 ```
-horizon-mod.toml               the only manifest and identity: id, version 0.2.5, api 0.2, [native]
+horizon-mod.toml               the only manifest and identity: id, version 0.2.6, api 0.2, [native]
 Cargo.toml                     one crate; its only dependency is horizon-mod-api from .horizon/sdk/
-rustfmt.toml                   tab_spaces = 2, the campaign's style
+src/rustfmt.toml               tab_spaces = 2, the campaign's style (a root one is refused)
 src/lib.rs                     the one impl Hooks: register, level_tick_post, commands
 src/network.rs                 game glue: the block entity Part, the wire links, the pass, commands
 src/runtime.rs                 the pure rules (30 tests), byte-identical to the retired bundle's

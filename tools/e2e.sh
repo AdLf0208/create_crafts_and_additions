@@ -43,12 +43,20 @@
 #     network pays it, exactly 1 FE a tick out of the source (the pool steady), block
 #     light 15 while lit and 0 while dark, and the unlinked differential: dark again and
 #     the source does not move.
+#  K  the accumulator's comparator output: a hierarchy comparator reading a formed 1x3
+#     tower drives its own redstone wire to power 0 (empty), 8 (3,000,000 of 6,000,000 — the
+#     jar's `fractionToRedstoneLevel` midpoint) and 15 (full); the same rig behind a stone
+#     block reads 0, and emptying the tower with `/createaddition energy` takes the wire
+#     back to 0.
 #
 # SELFTEST=1 flips B's conservation assertion (it must FAIL), proving the
 # scenario can fail. RELAY_SELFTEST=1 flips I's unpowered gate assertion instead, so
 # the relay leg's own counterfactual is a run of its own. LAMP_SELFTEST=1 flips J's
 # unlinked-lamp assertion (the lamp must not draw a single FE), so the lamp's
-# differential is a run of its own too.
+# differential is a run of its own too. COMPARATOR_SELFTEST=1 flips K's emptied-tower
+# assertion (the wire must have stayed where it was), so the comparator's own
+# counterfactual is a run as well. CMP_ONLY=1 runs just the comparator rig and prints both
+# comparator orientations with the wire each drives (the probe that pinned the geometry).
 #
 # The 0.1.0 runs of this scenario (PASS/EXIT:0 default, PASS/EXIT:0 with the
 # bundle's embedded content, FAIL/EXIT:1 selftest) are historical evidence for the
@@ -156,6 +164,22 @@ block_name() { ctl block "$1" "$2" "$3" | jq -r '.name // .block // empty'; }
 
 # The block state's own string, e.g. `createaddition:modular_accumulator[bottom=false,top=true]`.
 block_state() { ctl block "$1" "$2" "$3" | jq -r '.state // empty'; }
+
+# A redstone wire's own `power` state — the signal the world carries out of a comparator, not the
+# mod's readout. Empty when the block at that position has no `power` property.
+wire_power() { # X Y Z -> the integer in `power=`
+    block_state "$1" "$2" "$3" | sed -n 's/.*power=\([0-9][0-9]*\).*/\1/p'
+}
+
+expect_wire() { # expect_wire X Y Z LEVEL WHAT
+    local power
+    power=$(wire_power "$1" "$2" "$3")
+    [ -n "$power" ] \
+        || fail "no redstone wire at $1,$2,$3 (state '$(block_state "$1" "$2" "$3")')"
+    [ "$power" = "$4" ] \
+        || fail "$5: the wire at $1,$2,$3 carries power=$power, expected power=$4"
+    echo "  $5: redstone_wire at $1,$2,$3 power=$power" >&2
+}
 
 # The `top` / `bottom` multiblock bits of an accumulator, asserted on the state string the game
 # reports (not on the mod's own readout).
@@ -436,6 +460,38 @@ if [ "${LOOT_ONLY:-0}" = 1 ]; then
         ctl command "execute at @s run setblock ~2 ~ ~ minecraft:air" >/dev/null
     done
     echo "PASS: every block drops one of itself (LOOT_ONLY)"
+    exit 0
+fi
+
+# CMP_ONLY=1: the comparator rig alone — both orientations of one comparator, each with its own
+# wire, printed so the geometry the default run asserts is measured and not assumed. The probe
+# log is the evidence for which side of a comparator reads the block behind it.
+if [ "${CMP_ONLY:-0}" = 1 ]; then
+    launch "$GAME" "$WORLD"
+    arena
+    CMP_PROBE=$((X0 + 60))
+    ctl command "execute in minecraft:the_end run fill $((CMP_PROBE - 3)) 100 -4 $((CMP_PROBE + 3)) 100 4 minecraft:stone" >/dev/null
+    ctl command "execute in minecraft:the_end run fill $((CMP_PROBE - 3)) 101 -4 $((CMP_PROBE + 3)) 104 4 minecraft:air" >/dev/null
+    ctl wait 6 >/dev/null
+    ctl command "execute in minecraft:the_end run tp @s $((CMP_PROBE + 1)).5 101 0.5" >/dev/null
+    ctl wait 4 >/dev/null
+    place_accumulator "$CMP_PROBE" 100
+    place_accumulator "$CMP_PROBE" 101
+    place_accumulator "$CMP_PROBE" 102
+    ctl wait 6 >/dev/null
+    info "$CMP_PROBE" 100 0
+    echo "  probe: tower $energy/$capacity at x=$CMP_PROBE" >&2
+    seed_at "$CMP_PROBE" 100 6000000
+    ctl wait 8 >/dev/null
+    ctl command "execute in minecraft:the_end run setblock $CMP_PROBE 101 1 minecraft:comparator[facing=north]" >/dev/null
+    ctl command "execute in minecraft:the_end run setblock $CMP_PROBE 101 2 minecraft:redstone_wire" >/dev/null
+    ctl command "execute in minecraft:the_end run setblock $CMP_PROBE 101 -1 minecraft:comparator[facing=south]" >/dev/null
+    ctl command "execute in minecraft:the_end run setblock $CMP_PROBE 101 -2 minecraft:redstone_wire" >/dev/null
+    ctl wait 12 >/dev/null
+    echo "  probe: comparator$([ "$(block_name "$CMP_PROBE" 101 1)" = minecraft:comparator ] && echo ok || echo missing) facing=north, wire z=2 power=$(wire_power "$CMP_PROBE" 101 2)" >&2
+    echo "  probe: comparator$([ "$(block_name "$CMP_PROBE" 101 -1)" = minecraft:comparator ] && echo ok || echo missing) facing=south, wire z=-2 power=$(wire_power "$CMP_PROBE" 101 -2)" >&2
+    echo "  probe: tower reads $(block_state "$CMP_PROBE" 101 0)" >&2
+    echo "PASS: the comparator probe printed both orientations (CMP_ONLY)"
     exit 0
 fi
 
@@ -1024,4 +1080,81 @@ if [ "${LAMP_SELFTEST:-0}" = 1 ]; then
     [ "$LAMP_S3" != "$LAMP_S4" ] || fail "LAMP_SELFTEST: the unlinked lamp drew nothing, so the assertion is alive"
 fi
 
-echo "PASS: FE crossed the wire at 1,000/t and was conserved, an unlinked connector moved nothing, the 16-block limit held, copper was refused between two large connectors, an accumulator fed the block above it, a three-high tower formed one 6,000,000 FE pool, a broken tower re-formed at 4,000,000, separated accumulators stayed singles, a doctored saved tower was refused as its block's own single, every block drops itself, the redstone relay passed energy only while powered, and the small light connector lit from its network's one FE a tick and went dark when unlinked"
+echo "== K: the accumulator answers a comparator with the jar's fraction =="
+# Upstream (`ModularAccumulatorBlock.hasAnalogOutputSignal`/`getAnalogOutputSignal`): a comparator
+# reads the controller's `getFillState()` and maps it with
+# `ComparatorUtil.fractionToRedstoneLevel`, so the answer is the **tower's** fraction, not one
+# block's. The assertion is the wire's own `power` state from `ctl block`, so it is the world's
+# answer and not the mod's readout, and the middle seed is the jar's real midpoint (8): a mapping
+# that only told empty from non-empty would read 15 there, and the un-offset fraction reads 7.
+CMP_A=$((X0 + 60))        # the tower's x: a 1x3 column, so the pool is 6,000,000 FE
+CMP_S=$((CMP_A + 3))      # the differential: the same rig behind a stone block
+CMP_Y=100
+ctl command "execute in minecraft:the_end run fill $((CMP_A - 1)) 100 -2 $((CMP_S + 1)) 100 3 minecraft:stone" >/dev/null
+ctl command "execute in minecraft:the_end run fill $((CMP_A - 1)) 101 -2 $((CMP_S + 1)) 104 3 minecraft:air" >/dev/null
+ctl wait 6 >/dev/null
+ctl command "execute in minecraft:the_end run tp @s $((CMP_A + 1)).5 101 2.5" >/dev/null
+ctl wait 4 >/dev/null
+place_accumulator "$CMP_A" 100
+place_accumulator "$CMP_A" 101
+place_accumulator "$CMP_A" 102
+ctl wait 6 >/dev/null
+info "$CMP_A" "$CMP_Y" 0
+[ "$kind" = accumulator ] || fail "the comparator rig's tower reads as '$kind'"
+[ "$capacity" = 6000000 ] || fail "the comparator rig's tower holds $capacity, expected a 1x3 tower's 6,000,000"
+# A comparator reads the block on its `facing` side and drives the block behind it: the CMP_ONLY
+# probe measured both mirror orientations and the wire on the opposite side of `facing` is the one
+# that carries the signal.
+ctl command "execute in minecraft:the_end run setblock $CMP_A $((CMP_Y + 1)) 1 minecraft:comparator[facing=north]" >/dev/null
+ctl command "execute in minecraft:the_end run setblock $CMP_A $((CMP_Y + 1)) 2 minecraft:redstone_wire" >/dev/null
+ctl command "execute in minecraft:the_end run setblock $CMP_S 101 0 minecraft:stone" >/dev/null
+ctl command "execute in minecraft:the_end run setblock $CMP_S 101 1 minecraft:comparator[facing=north]" >/dev/null
+ctl command "execute in minecraft:the_end run setblock $CMP_S 101 2 minecraft:redstone_wire" >/dev/null
+ctl wait 8 >/dev/null
+[ "$(block_name "$CMP_A" 101 1)" = minecraft:comparator ] \
+    || fail "the comparator did not place at $CMP_A,101,1"
+[ "$(block_name "$CMP_A" 101 2)" = minecraft:redstone_wire ] \
+    || fail "the comparator's wire did not place at $CMP_A,101,2"
+[ "$(block_name "$CMP_S" 101 1)" = minecraft:comparator ] \
+    || fail "the differential comparator did not place at $CMP_S,101,1"
+[ "$(block_name "$CMP_S" 101 2)" = minecraft:redstone_wire ] \
+    || fail "the differential wire did not place at $CMP_S,101,2"
+
+echo "  -- an empty 1x3 tower reads power=0"
+expect_wire "$CMP_A" 101 2 0 "an empty tower"
+
+echo "  -- 3,000,000 of 6,000,000 reads the jar's 8 (7 is the un-offset fraction, 15 a 0/15 mapping)"
+seed_at "$CMP_A" "$CMP_Y" 3000000
+ctl wait 8 >/dev/null
+info "$CMP_A" "$CMP_Y" 0
+[ "$energy" = 3000000 ] || fail "the tower holds $energy FE after seeding 3,000,000"
+expect_wire "$CMP_A" 101 2 8 "a half-full tower"
+
+echo "  -- a full tower reads power=15"
+seed_at "$CMP_A" "$CMP_Y" 6000000
+ctl wait 8 >/dev/null
+info "$CMP_A" "$CMP_Y" 0
+[ "$energy" = 6000000 ] || fail "the tower holds $energy FE after seeding 6,000,000"
+expect_wire "$CMP_A" 101 2 15 "a full tower"
+CMP_FULL=$(wire_power "$CMP_A" 101 2)
+
+echo "  -- the differential: the same comparator rig behind a stone block reads 0"
+[ "$(block_name "$CMP_S" 101 0)" = minecraft:stone ] \
+    || fail "the differential block is not stone"
+expect_wire "$CMP_S" 101 2 0 "a stone block"
+
+echo "  -- emptied with /createaddition energy, the wire falls back to 0"
+seed_at "$CMP_A" "$CMP_Y" 0
+ctl wait 8 >/dev/null
+CMP_EMPTY=$(wire_power "$CMP_A" 101 2)
+[ -n "$CMP_EMPTY" ] || fail "the comparator's wire vanished: '$(block_state "$CMP_A" 101 2)'"
+[ "$CMP_EMPTY" = 0 ] || fail "emptying the tower left the wire at power=$CMP_EMPTY"
+echo "  emptied: redstone_wire at $CMP_A,101,2 power=$CMP_EMPTY" >&2
+if [ "${COMPARATOR_SELFTEST:-0}" = 1 ]; then
+    # The deliberately wrong expectation: emptying the tower must have left the wire where it was.
+    # It did not, so this leg fails — the counterfactual for the assertion above.
+    [ "$CMP_EMPTY" = "$CMP_FULL" ] \
+        || fail "COMPARATOR_SELFTEST: emptying the tower moved the wire from power=$CMP_FULL to power=$CMP_EMPTY, so the assertion is alive"
+fi
+
+echo "PASS: FE crossed the wire at 1,000/t and was conserved, an unlinked connector moved nothing, the 16-block limit held, copper was refused between two large connectors, an accumulator fed the block above it, a three-high tower formed one 6,000,000 FE pool, a broken tower re-formed at 4,000,000, separated accumulators stayed singles, a doctored saved tower was refused as its block's own single, every block drops itself, the redstone relay passed energy only while powered, the small light connector lit from its network's one FE a tick and went dark when unlinked, and a comparator on the formed tower carried the jar's fraction (0, 8, 15) on its own output wire while the same rig on stone read 0"

@@ -23,8 +23,8 @@ use mod_api::{
   BlockPart, Command, CommandArgumentValue, CommandInvocation, Compound, Direction, ENERGY,
   HasAnalogOutputEvent, Host, HostBlockStates, HostTransaction, InteractionResult, ItemKey,
   ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef, LightEmissionEvent, ModEnergyBuffer,
-  NeighbourUpdate, ServerHost, StateConstraint, StateForPlacementEvent, Tag, Text, UseItemOnEvent,
-  move_energy,
+  NeighbourUpdate, OnDestroyedByPlayerEvent, ServerHost, StateConstraint, StateForPlacementEvent,
+  Tag, Text, UseItemOnEvent, move_energy,
 };
 
 use crate::render::{self, WireKind};
@@ -56,6 +56,12 @@ const ELECTRUM_SPOOL: &str = "createaddition:electrum_spool";
 /// string of lights on the wire. It is a spool and not a wire item, because a festive wire is never
 /// an item upstream (`WireType.FESTIVE` drops copper wires, so only its spool is a stack).
 const FESTIVE_SPOOL: &str = "createaddition:festive_spool";
+/// The wire items a broken connector's wires drop, four per wire (`WireType.getDrop()`).
+/// `createaddition:iron_wire` is not here: `WireType.IRON` is commented out upstream, so no wire
+/// kind ever drops one.
+const COPPER_WIRE: &str = "createaddition:copper_wire";
+const GOLD_WIRE: &str = "createaddition:gold_wire";
+const ELECTRUM_WIRE: &str = "createaddition:electrum_wire";
 /// The block entity's saved charge: the game's own buffer keeps its amount here
 /// (`ModEnergyBuffer`'s doc), so the readout and the retired bundle's saves agree.
 const CHARGE: &str = "energy";
@@ -276,7 +282,8 @@ struct RelayMove {
   out: i32,
 }
 
-/// The registry keys this port resolves once per pass: the six blocks and the four spools.
+/// The registry keys this port resolves once per pass: the six blocks, the four spools and the
+/// three wire items a broken connector drops.
 #[derive(Clone, Copy)]
 struct Keys {
   small: BlockKey,
@@ -290,10 +297,15 @@ struct Keys {
   gold: ItemKey,
   electrum: ItemKey,
   festive: ItemKey,
+  copper_wire: ItemKey,
+  gold_wire: ItemKey,
+  electrum_wire: ItemKey,
 }
 
 impl Keys {
-  /// Resolve every key, or `None` while the registry lacks one of them.
+  /// Resolve every key, or `None` while the registry lacks one of them. The spool and wire items
+  /// are resolved **from** the jar's two drop tables ([`source_drop`], [`wire_drop`]), so an id
+  /// is written once and a wire and its drop cannot drift apart.
   fn resolve(host: &dyn Host) -> Option<Keys> {
     let item = |id: &str| {
       let identifier = mod_api::Identifier::parse(id).ok()?;
@@ -307,11 +319,23 @@ impl Keys {
       light: host.block_key(LIGHT_CONNECTOR)?,
       creative: host.block_key(CREATIVE)?,
       spool: item(SPOOL)?,
-      copper: item(COPPER_SPOOL)?,
-      gold: item(GOLD_SPOOL)?,
-      electrum: item(ELECTRUM_SPOOL)?,
-      festive: item(FESTIVE_SPOOL)?,
+      copper: item(source_drop(Laying::Copper))?,
+      gold: item(source_drop(Laying::Gold))?,
+      electrum: item(source_drop(Laying::Electrum))?,
+      festive: item(source_drop(Laying::Festive))?,
+      copper_wire: item(wire_drop(Laying::Copper))?,
+      gold_wire: item(wire_drop(Laying::Gold))?,
+      electrum_wire: item(wire_drop(Laying::Electrum))?,
     })
+  }
+
+  /// The item a wire of `kind` drops when its connector is broken (`WireType.getDrop()`'s item).
+  fn wire_item(self, kind: Laying) -> ItemKey {
+    match kind {
+      Laying::Copper | Laying::Festive => self.copper_wire,
+      Laying::Gold => self.gold_wire,
+      Laying::Electrum => self.electrum_wire,
+    }
   }
 
   /// Which of our blocks `block` is.
@@ -403,6 +427,17 @@ impl Laying {
       Self::Gold => "gold",
       Self::Electrum => "electrum",
       Self::Festive => "festive",
+    }
+  }
+
+  /// The kind's index in the jar's `WireType` enum (`COPPER` 0, `GOLD` 1, `ELECTRUM` 2,
+  /// `FESTIVE` 3): the order `dropWires` files and drops its per-kind stacks in.
+  const fn index(self) -> u8 {
+    match self {
+      Self::Copper => 0,
+      Self::Gold => 1,
+      Self::Electrum => 2,
+      Self::Festive => 3,
     }
   }
 
@@ -897,6 +932,18 @@ impl BlockPart for ConnectorShape {
   ) -> Option<InteractionResult> {
     spool_click(host, event, &self.pending)
   }
+
+  /// A player breaks the connector: the wires it holds drop where it stood and every peer lets go
+  /// of it (upstream's `playerWillDestroy`). `None` leaves the block's own removal and loot table
+  /// to vanilla.
+  fn on_destroyed_by_player(
+    &self,
+    host: &mut dyn ServerHost,
+    event: &mut OnDestroyedByPlayerEvent<'_>,
+  ) -> Option<bool> {
+    broken_by_player(host, event);
+    None
+  }
 }
 
 /// The relay's Part: where a placed one sits, and what a spool does with it. A relay takes
@@ -943,6 +990,16 @@ impl BlockPart for RelayShape {
   ) -> Option<InteractionResult> {
     spool_click(host, event, &self.pending)
   }
+
+  /// A player breaks the relay: its wires drop where it stood and both networks let go of it.
+  fn on_destroyed_by_player(
+    &self,
+    host: &mut dyn ServerHost,
+    event: &mut OnDestroyedByPlayerEvent<'_>,
+  ) -> Option<bool> {
+    broken_by_player(host, event);
+    None
+  }
 }
 
 /// The lamp's Part: a connector's placement and spool click, plus the light its `powered` bit
@@ -978,6 +1035,16 @@ impl BlockPart for LightShape {
     event: &mut UseItemOnEvent<'_>,
   ) -> Option<InteractionResult> {
     spool_click(host, event, &self.pending)
+  }
+
+  /// A player breaks the lamp: its wires drop where it stood and every peer lets go of it.
+  fn on_destroyed_by_player(
+    &self,
+    host: &mut dyn ServerHost,
+    event: &mut OnDestroyedByPlayerEvent<'_>,
+  ) -> Option<bool> {
+    broken_by_player(host, event);
+    None
   }
 
   /// The lamp glows at full light while its `powered` bit is set (upstream's
@@ -1311,6 +1378,123 @@ fn spools_back(wires: &[SavedWire]) -> [(Laying, u32); 4] {
     }
   }
   counts
+}
+
+/// How many items one wire drops when the connector holding it is broken: `WireType`'s own
+/// `CAItems.COPPER_WIRE.asStack(4)` (and the same four for every kind).
+const WIRE_DROP: u32 = 4;
+
+/// The wire item one wire of `kind` drops when its connector is broken — the jar's
+/// `WireType.getDrop()`: the kind's own wire, except the festive wire's, which is a copper wire
+/// (`FESTIVE(3, 256, …, CAItems.COPPER_WIRE.asStack(4), …)`: a festive wire is never an item).
+fn wire_drop(kind: Laying) -> &'static str {
+  match kind {
+    Laying::Copper | Laying::Festive => COPPER_WIRE,
+    Laying::Gold => GOLD_WIRE,
+    Laying::Electrum => ELECTRUM_WIRE,
+  }
+}
+
+/// The stack a wire coils back onto — the jar's `WireType.getSourceDrop()`: each kind's own spool
+/// (copper, gold, electrum, festive), never another kind's.
+fn source_drop(kind: Laying) -> &'static str {
+  match kind {
+    Laying::Copper => COPPER_SPOOL,
+    Laying::Gold => GOLD_SPOOL,
+    Laying::Electrum => ELECTRUM_SPOOL,
+    Laying::Festive => FESTIVE_SPOOL,
+  }
+}
+
+/// The stacks a broken connector drops, one per wire kind it held, in `WireType`'s own order:
+/// four wire items per wire, aggregated by kind. Nothing for a break that drops no items (a
+/// creative player's: upstream's `dropWires(level, false)` only disconnects).
+fn break_stacks(wires: &[SavedWire], drop_items: bool) -> Vec<(Laying, u32)> {
+  if !drop_items {
+    return Vec::new();
+  }
+  let mut counts: Vec<(Laying, u32)> = Vec::new();
+  for saved in wires {
+    match counts.iter_mut().find(|(kind, _)| *kind == saved.wire) {
+      Some((_, count)) => *count += WIRE_DROP,
+      None => counts.push((saved.wire, WIRE_DROP)),
+    }
+  }
+  // `dropWires` files each kind's stack in `NonNullList.withSize(WireType.values().length)`, so
+  // the drops leave in the enum's order whatever order the links were saved in.
+  counts.sort_by_key(|(kind, _)| kind.index());
+  counts
+}
+
+/// The links of a connector once the block at `gone` is taken out of the world: the peer's
+/// reciprocal node goes with it (upstream's block-entity `remove()` clears it without a second
+/// drop), every other link stays in its saved order.
+fn links_without(links: &[SavedWire], gone: Pos) -> Vec<SavedWire> {
+  links
+    .iter()
+    .filter(|saved| saved.pos != gone)
+    .cloned()
+    .collect()
+}
+
+/// A player broke one of our wire blocks: its wires drop where it stood (upstream's
+/// `playerWillDestroy` → `dropWires(level, !player.isCreative())`) and every peer lets go of it
+/// (the block entity's `remove()` clears the reciprocal node without a second drop).
+///
+/// A peer that is unloaded or refuses the write keeps its edge; upstream lets it go when it next
+/// loads, and the network walk already ignores a link the peer does not name back.
+fn break_wires(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, pos: Pos, creative: bool) {
+  let Some(saved) = saved_at(host, level, keys, pos) else {
+    return;
+  };
+  if saved.kind.wire_node().is_none() {
+    return;
+  }
+  let wires = saved_wires(&saved.nbt);
+  if wires.is_empty() {
+    return;
+  }
+  if !creative {
+    for (kind, count) in break_stacks(&wires, true) {
+      if let Some(stack) = ItemStack::new(keys.wire_item(kind), count) {
+        let _ = level.pop_resource(host, pos, stack);
+      }
+    }
+  }
+  for wire in &wires {
+    let Some(peer) = saved_at(host, level, keys, wire.pos) else {
+      continue;
+    };
+    let links = saved_wires(&peer.nbt);
+    if !links.iter().any(|link| link.pos == pos) {
+      continue;
+    }
+    let kept = links_without(&links, pos);
+    let mut data = Compound::new();
+    store_wires(&mut data, &kept);
+    let _ = host
+      .block_entity(level, wire.pos)
+      .is_some_and(|entity| entity.merge_data(host, data).is_ok());
+  }
+}
+
+/// The break half shared by the three wire Parts: [a player destroyed one of our wire blocks]
+/// (or the block was destroyed by a player's break in survival), so its wires are dealt with
+/// before vanilla removes the block and drops its own loot.
+fn broken_by_player(host: &mut dyn ServerHost, event: &OnDestroyedByPlayerEvent<'_>) {
+  let Some(keys) = Keys::resolve(host) else {
+    return;
+  };
+  let Some(level) = level_in_place(host) else {
+    return;
+  };
+  // Upstream passes `!player.isCreative()`. An unknown answer is taken as survival: a wire that
+  // drops for a creative player is recoverable, one that silently vanishes is not.
+  let creative = host
+    .player(event.player)
+    .and_then(|player| player.is_creative(host))
+    == Some(true);
+  break_wires(host, level, keys, event.pos, creative);
 }
 
 /// The empty spool takes every wire out of the clicked connector, on both ends.
@@ -4234,6 +4418,119 @@ mod tests {
     assert_eq!(
       sink, 20_000,
       "the accumulator gains 20,000 FE over the 20 measured ticks"
+    );
+  }
+
+  // --- the break-drop path --------------------------------------------------
+
+  /// A saved wire of `kind` at `pos` in `node`.
+  fn kind_wire(pos: Pos, node: i32, kind: Laying) -> SavedWire {
+    SavedWire {
+      pos,
+      node,
+      wire: kind,
+    }
+  }
+
+  #[test]
+  fn a_broken_connector_drops_four_wires_of_each_kind_it_held() {
+    // `WireType.getDrop()` is `CAItems.<KIND>_WIRE.asStack(4)`, and `dropWires` aggregates one
+    // stack per wire kind (`NonNullList.withSize(WireType.values().length)`), so two copper
+    // wires are one stack of eight and the gold wire is a stack of its own.
+    let wires = vec![
+      kind_wire([9, 64, 0], 0, Laying::Copper),
+      kind_wire([8, 64, 0], 1, Laying::Copper),
+      kind_wire([7, 64, 0], 2, Laying::Gold),
+      kind_wire([6, 64, 0], 3, Laying::Festive),
+    ];
+    assert_eq!(
+      break_stacks(&wires, true),
+      vec![(Laying::Copper, 8), (Laying::Gold, 4), (Laying::Festive, 4),],
+      "four wire items per wire, one stack per kind, in WireType's own order"
+    );
+  }
+
+  #[test]
+  fn a_creative_break_takes_the_wires_out_and_drops_nothing() {
+    // Upstream's `playerWillDestroy` passes `!player.isCreative()` to
+    // `dropWires(level, dropItems)`, whose false arm only invalidates the nodes.
+    let wires = vec![
+      kind_wire([1, 0, 0], 0, Laying::Copper),
+      kind_wire([2, 0, 0], 1, Laying::Electrum),
+    ];
+    assert!(
+      break_stacks(&wires, false).is_empty(),
+      "a creative break drops no wire"
+    );
+    assert_eq!(
+      break_stacks(&wires, true),
+      vec![(Laying::Copper, 4), (Laying::Electrum, 4)],
+      "the same break in survival drops them, so the creative case is not vacuous"
+    );
+  }
+
+  #[test]
+  fn the_festive_wire_drops_copper_wires_and_coils_back_onto_its_own_spool() {
+    // The jar's two tables are different: `FESTIVE(3, 256, …, CAItems.COPPER_WIRE.asStack(4),
+    // CAItems.FESTIVE_SPOOL)` — its drop is a copper wire, its source drop a festive spool.
+    assert_eq!(wire_drop(Laying::Copper), "createaddition:copper_wire");
+    assert_eq!(wire_drop(Laying::Gold), "createaddition:gold_wire");
+    assert_eq!(wire_drop(Laying::Electrum), "createaddition:electrum_wire");
+    assert_eq!(
+      wire_drop(Laying::Festive),
+      "createaddition:copper_wire",
+      "a festive wire drops copper wires, not a festive one (WireType.FESTIVE.getDrop())"
+    );
+    assert_eq!(
+      source_drop(Laying::Copper),
+      "createaddition:copper_spool",
+      "a copper wire coils back onto a copper spool"
+    );
+    assert_eq!(source_drop(Laying::Gold), "createaddition:gold_spool");
+    assert_eq!(
+      source_drop(Laying::Electrum),
+      "createaddition:electrum_spool"
+    );
+    assert_eq!(
+      source_drop(Laying::Festive),
+      "createaddition:festive_spool",
+      "the festive wire's source drop is the festive spool (WireType.FESTIVE.getSourceDrop())"
+    );
+    assert_eq!(WIRE_DROP, 4, "every WireType's drop is `asStack(4)`");
+  }
+
+  #[test]
+  fn a_break_takes_the_broken_connector_out_of_its_peers_links() {
+    // Upstream's block-entity `remove()` clears the peer's reciprocal node without a second
+    // drop, so the peer's list no longer names the broken block and nothing drops twice.
+    let gone = [10, 64, 0];
+    let kept = [12, 64, 0];
+    let peer = vec![
+      kind_wire(gone, 0, Laying::Copper),
+      kind_wire(kept, 1, Laying::Gold),
+    ];
+    assert_eq!(
+      links_without(&peer, gone),
+      vec![kind_wire(kept, 1, Laying::Gold)],
+      "the broken block's edge goes, the other wire stays in its saved order and node"
+    );
+    assert!(
+      links_without(&peer, [30, 64, 0]).len() == 2,
+      "a break of another block leaves this peer's links alone"
+    );
+  }
+
+  #[test]
+  fn an_unlinked_connector_drops_no_wire() {
+    // The in-game differential's rule: a connector with no wire contributes no stack, which is
+    // only meaningful because a wired one does.
+    assert!(
+      break_stacks(&[], true).is_empty(),
+      "a connector that holds no wire drops no wire"
+    );
+    assert_eq!(
+      break_stacks(&[kind_wire([1, 0, 0], 0, Laying::Copper)], true),
+      vec![(Laying::Copper, 4)]
     );
   }
 }

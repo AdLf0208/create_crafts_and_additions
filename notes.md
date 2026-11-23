@@ -247,6 +247,11 @@ The ruling above is about the Java mod; a migration must not carry **our** bugs 
 - **Festive wire and spool**, the iron wire, and the electrum/brass/copper metal
   items. (All but the metal items are carried since 0.2.8; the wire is *drawn* since
   0.2.9, § [`## Slice 10`](#slice-10--the-wire-renderer-029).)
+- ~~**The wire-drop path** (`WireType.getDrop()`/`getSourceDrop()` on a broken connector): a
+  broken connector dropped nothing and left the wire in its peer's list.~~ **Closed in 0.2.10**:
+  four wires of each kind at the broken block, a festive wire's four being copper wires, the peer's
+  link removed without a second drop, and nothing in creative, §
+  [`## Slice 11`](#slice-11--the-wires-a-broken-connector-drops-0210).
 - **Contraption/Sable integration** (wires that follow a moving contraption).
 - **A 0.1.0 world's block entities do not survive the migration.** 0.1.0's entities were typed
   by their **block id** (the `block_entity` hook returned `(block_id, Compound)`); 0.2.0
@@ -2324,3 +2329,219 @@ createaddition (1 of 1)` line and the two patched functions.
 
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review
+
+---
+
+## Slice 11 — the wires a broken connector drops (0.2.10)
+
+### The slice, and the gap line it comes from
+
+0.2.9's report proposed it as the next slice, and its own words name the gap:
+
+> **Gaps**: "the port has no wire-drop path at all … `WireType.getDrop()` is therefore not
+> exercised"
+
+**Choice.** A laid wire could be *taken out* (the empty spool, 0.2.1) but never *lost*: breaking
+the connector it hung on left the wire in the peer's list and dropped nothing, while upstream drops
+four wire items at the broken block and empties the peer's node. It is the last server half of the
+wire family, and the first slice that exercises `WireType`'s two drop tables.
+
+**Tier fit.** `deep`: one more Part method on the three wire blocks (a block-destruction moment, a
+level write per peer), the jar's two item tables, and carried items that already exist
+(`copper_wire`, `gold_wire`, `electrum_wire`). No renderer, no entity, no new block.
+
+### The drop rules, read from the artefact before implementing
+
+Repo `658a390b8ff4daa17013e9447b29949330c8a42a` (analysis only; the port is a clean-room rewrite):
+
+| file | what it says |
+|---|---|
+| `energy/WireType.java:8-13` | `COPPER(0,256,78,37,30, COPPER_WIRE.asStack(4), COPPER_SPOOL)`, `GOLD(1,1024, …, GOLD_WIRE×4, GOLD_SPOOL)`, `ELECTRUM(2,8196, …, ELECTRUM_WIRE×4, ELECTRUM_SPOOL)`, `FESTIVE(3,256,26,94,12, **COPPER_WIRE×4**, FESTIVE_SPOOL)` — the festive wire's **drop is a copper wire**; only its *source* drop is a festive spool |
+| `energy/WireType.java:47-53` | `getDrop()` / `getSourceDrop()` are `DROP.copy()` / `SOURCE_DROP.copy()` |
+| `blocks/connector/base/AbstractConnectorBlock.java:83-92` | `playerWillDestroy`: server side, an `IWireNode` gets the wire-break sound when it `hasAnyConnection()`, then `cte.dropWires(level, !player.isCreative())` |
+| `energy/IWireNode.java:300-318` | `dropWires(Level, boolean)`: `false` ⇒ `disconnectWires()` only (no items); `true` ⇒ one stack **per `WireType` index** (`NonNullList.withSize(WireType.values().length)`, first `type.getDrop()`, then `grow(getDrop().getCount())`), each `dropWire(world, getPos(), stack)` = `Containers.dropContents` **at the broken block** |
+| `blocks/connector/base/AbstractConnectorBlockEntity.java:~320-350` | the block entity's `remove()`: each peer's reciprocal node is `removeNode(ourNode)` **without** a drop when our node is already invalid — the peer's list empties and nothing drops twice |
+| `energy/IWireNode.java:320-352` | the **three-arg** `dropWires(Level, Player, boolean)` (an empty spool in the pack ⇒ `getSourceDrop()`, else `getDrop()`; `getInventory().add` else drop) is `onSneakWrenched`'s route, not the break's; the port has its spool half since 0.2.1 (`remove_wires`/`spools_back`) |
+
+So the break path is: **four wire items of the wire's kind per wire, one stack per kind, at the
+broken block, only outside creative, and the peer's link removed without a second drop.**
+
+### The route at the pin
+
+`hook:on_destroyed_by_player` (`IBlockExtension.onDestroyedByPlayer`, contract *replace*, scope
+*block*) is a **`BlockPart` method**: asked of our blocks only, *before* anything of the break
+changes the world, with `player: u128`, `pos`, `state`, `tool`, `will_harvest`. Answering `None`
+leaves vanilla's removal and the block's own loot table alone. The breaking player is
+`host.player(uuid)` (a `PlayersHost` lookup), and `LevelRef::pop_resource(host, pos, stack)` drops
+"as a broken block drops it". Stamped at this pin: `mod_api_generated.rs:8621`, and the part
+fixture `parts/blocks_fixtures/destroyed_by_player_game_thread.rs`.
+
+### What it does
+
+- **The two tables, once.** `wire_drop(kind)` (copper/gold/electrum/festive → the kind's wire, and
+  the festive wire a **copper** wire) and `source_drop(kind)` (each kind's own spool). `Keys::resolve`
+  now takes the spool and wire items **from** these tables, so an id is written once and a wire and
+  its drop cannot drift apart.
+- **One stack per kind, four per wire** (`break_stacks`), filed in `WireType`'s order and dropped at
+  the connector's own position — two copper wires are one stack of eight.
+- **Creative drops nothing.** `player.is_creative(host) == Some(true)` takes the wires out with no
+  items, as `dropWires(level, false)` does; an unknown answer is treated as survival (a wire that
+  drops is recoverable, one that vanishes is not).
+- **The peer lets go.** Every loaded peer whose list names the broken block is rewritten without it
+  (`links_without`), keeping its other wires in their saved order and nodes.
+- **The block itself is vanilla's.** The Part answers `None`, so the connector's own 26.3 loot table
+  still drops one connector — which the leg asserts, so the "no wire" differential is not vacuous.
+
+### Red → green (TDD)
+
+The rules went in first as the pre-slice behaviour — no drop table (`wire_drop`/`source_drop` empty
+strings, `break_stacks` empty, `links_without` a copy) — with five tests written against the jar's
+own numbers. `drop-red.log`, verbatim:
+
+```
+---- network::tests::a_broken_connector_drops_four_wires_of_each_kind_it_held stdout ----
+thread '...' panicked at src/network.rs:4293:5:
+assertion `left == right` failed: four wire items per wire, one stack per kind, in WireType's own order
+  left: []
+ right: [(Copper, 8), (Gold, 4), (Festive, 4)]
+---- network::tests::a_creative_break_takes_the_wires_out_and_drops_nothing stdout ----
+  left: []
+ right: [(Copper, 4), (Electrum, 4)]
+---- network::tests::a_break_takes_the_broken_connector_out_of_its_peers_links stdout ----
+  left: [SavedWire { pos: [10, 64, 0], node: 0, wire: Copper }, SavedWire { pos: [12, 64, 0], node: 1, wire: Gold }]
+ right: [SavedWire { pos: [12, 64, 0], node: 1, wire: Gold }]
+---- network::tests::the_festive_wire_drops_copper_wires_and_coils_back_onto_its_own_spool stdout ----
+  left: ""
+ right: "createaddition:copper_wire"
+---- network::tests::an_unlinked_connector_drops_no_wire stdout ----
+  left: []
+ right: [(Copper, 4)]
+
+test result: FAILED. 94 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Green: **99 passed, 0 failed** (`sdk-test.log`, regenerated for 0.2.10; 94 → 99: five new tests).
+The five: one stack per kind in `WireType`'s order (two copper wires → 8), creative drops nothing
+while the same break in survival drops them, both tables (including festive → copper wire and
+festive → festive spool), the peer's link removal (order and node kept, another block's break
+leaves the links alone), and the unlinked case paired with the wired one so it cannot pass
+vacuously. `src/runtime.rs` stays byte-identical (`03721ca4…95d`, packed too).
+
+### The 0.2.10 ladder
+
+| Step | Command | Result |
+|---|---|---|
+| red | `cargo test --offline` against the pre-slice tables | **94 passed, 5 failed**, exit 101 (`drop-red.log`) |
+| tests | the same | **99 passed**, 0 failed (`sdk-test.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| formatting | `cargo fmt --check` | clean (`sdk-fmt.log`, empty) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` | exit 0 (`drop-build-1…6.log`) |
+| package, again | `rm -f Cargo.lock` + the same, twice more | **byte-identical** (`cmp`) |
+| registry check | `cargo horizon-mod check createaddition.hmod` | exit 0, `0.2.10 … 190180 bytes` (`drop-check.log`) |
+| fits, campaign pin | `cargo horizon-mod fits … --build 0a875da…` | **`is made for exactly one build (it has a [native.mixin] table), so fits doesn't apply`**, exit 2 (`drop-fits-pin.log`) |
+| fits, another build | `… --build 0b14f8a…` | the same refusal, exit 2 (`drop-fits-other.log`) |
+| launcher build | `launcher-game.sh build createaddition` (the 0.2.9 tag moved out of `versions/` first) | `Compiling createaddition (1 of 1)`, tag `native-0a875da-4af24797bccd` (`drop-launcher-build.log`; the README's own sentence below moved the content hash once, so the build was repeated) |
+| launcher patch line | the launcher's own build log | `Function replacement: 2 functions patched by 2 mixins, without rebuilding the game (copy 114 ms, horizon-mixins 303 ms, compile 3021 ms, total 3440 ms)`, `"injections": 2` (`drop-launcher-patch.log`) |
+| package verifier | `python3 ports/tools/verify-sdk-package.py createaddition` | **1/1** (`verify-sdk-package.log`) |
+| recipe types | `python3 ports/tools/check-recipe-types.py createaddition` | `createaddition: ok` |
+
+**The two `fits` lines are the route's refusals, not a regression** (unchanged since 0.2.9: a
+package with a `[[native.mixin]]` row is made for exactly one game build). What replaces them as
+compatibility evidence is the launcher build above: the recompile and the two-function patch both
+ran against `0a875da`, the packaged manifest is `version = "0.2.10"`, the launcher's own identity for
+the mod is `0a875da91dbb… createaddition 0.2.10 1.99.1` (`drop-launcher-identity.json`), and
+`strings libcreateaddition.so` carries `createaddition:copper_wire` — the new code, in the binary
+the game ran.
+
+Deliverable: **`createaddition.hmod`, 190,180 B, SHA-256
+`db4306b2ce83cbc58d0ce71919f87741285391ae1dd7f18dc39cdbce1c912f76`**, **127 entries**,
+reproducible (repeated builds, `cmp`-identical), no packed `Cargo.lock`.
+
+```
+createaddition 0.2.10 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  190180 bytes, SHA-256 db4306b2ce83cbc58d0ce71919f87741285391ae1dd7f18dc39cdbce1c912f76, unsigned
+```
+
+### In-game (`e2e-drop-default.log`, `PASS` + `EXIT:0`)
+
+A dedicated leg (`tools/e2e-drop.sh`), because the A–M run's break phase is about the *blocks'* loot
+tables and never breaks a *linked* connector. It builds a pad in the End (the chunk loaded before the
+`fill`), lays one wire per kind between two connectors four blocks apart, stands the player on the
+floor 3.5 blocks off (inside the reach, outside the pickup radius) with an iron pickaxe (the
+connector's own loot table needs it — a bare hand drops nothing, which would have made the
+differential vacuous), breaks the far connector in survival and reads `ctl break`'s own reply:
+
+```
+== copper wire: lay it between 300 and 304, break the far connector in survival ==
+  near end: Connector at 300,101,0: mode none, buffer 0/1000 FE, links [(304,101,0)/0/copper], pool 0/0, demand 0, t=133
+  304: {"drops":{"createaddition:connector":1,"createaddition:copper_wire":4},"picked_up":{},"ticks":8}
+  peer: Connector at 300,101,0: mode none, buffer 0/1000 FE, links [], pool 0/0, demand 0, t=190
+== gold wire …  314: {"drops":{"createaddition:connector":1,"createaddition:gold_wire":4}, …}   peer links []
+== electrum wire …  324: {"drops":{"createaddition:connector":1,"createaddition:electrum_wire":4}, …}   peer links []
+== festive wire …  334: {"drops":{"createaddition:connector":1,"createaddition:copper_wire":4}, …}   peer links []
+== differential: an unlinked connector drops no wire ==
+  340: {"drops":{"createaddition:connector":1},"picked_up":{},"ticks":13}
+  an unlinked connector's break: {"createaddition:connector":1} (0 wire stacks)
+PASS: a broken connector drops four wires of each kind it held — the festive wire's four are copper
+wires — the peer's links empty, and an unlinked connector drops none
+```
+
+Why these can fail: `drops` is the exact map of item entities within three blocks of the block
+centre, so a package that drops nothing shows `{}` (the selftest) and a wrong kind or count shows a
+different map (the leg prints the mismatch and exits 1); the festive rig is the jar's own trap — four
+**copper** wires, not a festive anything; and the differential asserts the connector's own loot
+still arrives, so "no wire" cannot come from a break that dropped nothing at all.
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-drop-default.log` | `PASS` + `EXIT:0` | every kind's wire drops exactly four of its own drop at the broken block, the festive one's four are copper wires, the peer reads `links []`, and an unlinked connector drops no wire |
+| `e2e-drop-selftest.log` | `FAIL` + `EXIT:1` | `DROP_SELFTEST=1`: the unlinked connector dropped 0 wires, so the leg's differential assertion fails — the counterfactual is alive |
+| `e2e-drop-control.log` | `FAIL` + `EXIT:1` | a Nightly without the package does not know `createaddition:connector` (the setblock left `minecraft:air`), so the wires the modded run counts come from this package |
+| `e2e-drop-suite.log` | `PASS` + `EXIT:0` | the whole A–M suite on 0.2.10: the new break Part disturbed no earlier family |
+| `e2e-drop-suite-selftest.log` | `FAIL` + `EXIT:1` | the suite's conservation counterfactual is still alive |
+
+`python3 ports/tools/check-e2e-logs.py createaddition-e2e --strict`:
+**logs=40 ok=40 missing-exit=0 bad-exit=0** (the 35 earlier legs still green).
+
+Harness facts this slice cost: (1) `ctl break`'s `drops` counts **item entities**, and a block whose
+loot table needs a tool drops nothing to a bare hand — the first run's differential proved nothing
+(`{"drops":{}}`) until the player held the pickaxe; (2) the trail-of-`info` reply pattern needs no
+trailing space — `command_reply` appends one, and a pattern ending in a space matches two spaces and
+never matches; (3) `launcher-game.sh env` exports `CONTROL_GAME`, so a run meant to be the *default*
+leg must `unset CONTROL_GAME` or it silently runs the control leg; (4) the launcher reuses a build
+whose content hash it already has, so a *new* version's first build is the one that prints
+`Compiling …` and the patch line — the second run says "Up to date (no build needed)", and the
+launcher's shared `native/build.log` is overwritten by any concurrent build, so it must be copied in
+the same command.
+
+### Coverage added by this slice
+
+| family | status |
+|---|---|
+| a broken connector drops four wires of each kind it held | **tested** — `a_broken_connector_drops_four_wires_of_each_kind_it_held`; in game four rigs, `drops` exactly `{<kind>_wire: 4, connector: 1}` |
+| the festive wire's drop is a **copper** wire, its source drop a festive spool | **tested** — `the_festive_wire_drops_copper_wires_and_coils_back_onto_its_own_spool`; in game the festive rig drops `createaddition:copper_wire` ×4 |
+| a creative break takes the wires out and drops nothing | **tested** — `a_creative_break_takes_the_wires_out_and_drops_nothing` (the survival case asserted beside it) |
+| the peer lets go of a broken connector without a second drop | **tested** — `a_break_takes_the_broken_connector_out_of_its_peers_links`; in game every peer reads `links []` |
+| a connector with no wire drops no wire | **tested** — `an_unlinked_connector_drops_no_wire`, and the in-game differential (`{"createaddition:connector":1}`, 0 wire stacks) |
+| the block's own loot still drops on the same break | **tested** in game (the `connector: 1` in every drop map) |
+| a wire reclaimed with an empty spool (`getSourceDrop()` by hand) | **tested** since 0.2.1/0.2.8 (`remove_wires`/`spools_back`, the festive spool leg) |
+| the break-drop of a connector removed by the *level* (support gone, piston, water) | **not ported** — the port has no `canSurvive` for its connectors, so the level never removes one; upstream's `neighborChanged` path is unreachable here |
+| the sneak-wrench path (`dropWires(level, player, …)`: an empty spool in the pack turns a break into spools) | **not ported** — there is no wrench item in this port (Create's `IWrenchable` is the parent's), so its route has no trigger; the same table is what the empty-spool click uses |
+| a remote client's view of a break | **not ported** — no block-entity sync (the port's standing deviation 5) |
+
+### Deviations of this slice (declared)
+
+1. **The drop is one item stack per wire kind, not per wire.** Upstream aggregates by `WireType`
+   index too, so two copper wires are one stack of eight at the same position; the in-game assertion
+   sums the entities by item id, which is what a player sees.
+2. **Dropped through `LevelRef::pop_resource`**, the SDK's "as a broken block drops it" (an item
+   entity at a random point within a quarter block of the block centre, pickup delay 10 ticks).
+   Upstream's `Containers.dropContents` uses the same shape; the random offsets differ.
+3. **A peer that is unloaded or refuses the write keeps its edge** — upstream lets it go when it next
+   loads, and this port's network walk already ignores a link its peer does not name back, so the
+   stale edge is inert. The in-game leg's peer is loaded, so this is a boundary, not the tested path.
+4. **`will_harvest` is not used.** The creative test is `PlayerRef::is_creative`, as upstream's
+   `player.isCreative()` is; `will_harvest` is false for creative *and* for a tool the block refuses,
+   which would conflate the two.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices

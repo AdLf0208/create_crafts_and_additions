@@ -49,7 +49,10 @@ Each block drops itself when mined with a pickaxe (its own 26.3 loot table, and 
   shorter of the two bounds the pair), each connector has 4 or 6 nodes, one wire per node, and
   **copper and the festive wire** are refused between two large connectors (the jar's low-current
   pair; gold and electrum are the high-current ones). The empty spool coils each wire back onto a
-  spool of its own kind, so a festive link hands back a festive spool. `createaddition:iron_wire`
+  spool of its own kind, so a festive link hands back a festive spool. **Breaking a connector drops
+  its wires where it stood** — four of each wire's own kind, and a festive wire's four are copper
+  wires, as the jar's `WireType.FESTIVE` says — while its peers let go of it and nothing drops to a
+  creative player. `createaddition:iron_wire`
   is carried because 1.7.2 registers the item, but upstream comments out its wire kind and its
   spool, so it lays nothing here either.
 - Every tick after the level's own, each wire network moves FE: a pull connector draws up to

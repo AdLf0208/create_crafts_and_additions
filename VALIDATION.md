@@ -1,4 +1,78 @@
-# Validation — Create Crafts & Additions slices 1–10
+# Validation — Create Crafts & Additions slices 1–11
+
+## 0.2.10 — the wires a broken connector drops
+
+Pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (nightly 2026-11-20), mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`; every cargo/package step inside one
+`ports/tools/build-slot.sh` lease (`CARGO_INCREMENTAL=0`, no `--target-dir`), the package steps with
+`BUILD_LOCAL=1` (`cargo horizon-mod` is installed on this box only). In-game legs: the launcher-built
+game `native-0a875da-4af24797bccd` (launcher 0.2.92), whose build shows
+`Compiling createaddition (1 of 1)` and
+`Function replacement: 2 functions patched by 2 mixins, without rebuilding the game (copy 114 ms,
+horizon-mixins 303 ms, compile 3021 ms, total 3440 ms)` (`drop-launcher-patch.log`), and the launcher's identity for the mod
+`0a875da91dbb… createaddition 0.2.10 1.99.1` (`drop-launcher-identity.json`).
+
+The slice, in one line: upstream drops four wires of the wire's own kind at a broken connector
+(a festive wire's four are **copper** wires), nothing in creative, and empties the peer's node
+without a second drop. Rules quoted from the artefact and the route at the pin: `notes.md`
+§ *Slice 11*.
+
+Logs: `ports/_shared/evidence/createaddition/` (`drop-red.log`, `sdk-test.log`, `sdk-clippy.log`,
+`sdk-fmt.log`, `drop-build-1..6.log`, `drop-check.log`, `drop-fits-pin.log`, `drop-fits-other.log`,
+`drop-launcher-build.log`, `drop-launcher-patch.log`, `drop-launcher-patch-table.rs`,
+`drop-launcher-identity.json`, `drop-launcher-strings.log`, `verify-sdk-package.log`) and
+`ports/_shared/evidence/createaddition-e2e/` (`e2e-drop-*.log`).
+
+```
+red, pre-slice tables            94 passed, 5 failed (drop-red.log)
+  one stack per kind             left [] right [(Copper, 8), (Gold, 4), (Festive, 4)]
+  creative drops nothing         left [] right [(Copper, 4), (Electrum, 4)]
+  the peer's link                left [gone, kept] right [kept]
+  the drop tables                left "" right "createaddition:copper_wire"
+  the unlinked differential      left [] right [(Copper, 4)]
+cargo test --offline             99 passed, 0 failed             (sdk-test.log, regenerated)
+cargo clippy --all-targets --offline -- -D warnings   exit 0, 0 warnings (sdk-clippy.log)
+cargo fmt --check                clean (empty)                   (sdk-fmt.log)
+rm -f Cargo.lock && cargo horizon-mod build            exit 0       (drop-build-1.log)
+the same again (twice)                                 byte-identical (cmp)
+cargo horizon-mod check createaddition.hmod            0.2.10 … 190180 bytes (drop-check.log)
+fits --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a  "is made for exactly one build (it has a
+                                                       [native.mixin] table), so fits doesn't
+                                                       apply", exit 2   (drop-fits-pin.log)
+fits --build 0b14f8acfd97fa2c750e42795249dcc981178ca4  the same refusal, exit 2
+                                                                    (drop-fits-other.log)
+launcher-game.sh build createaddition   Compiling createaddition (1 of 1);
+                                        Function replacement: 2 functions patched by 2 mixins
+                                                                    (drop-launcher-patch.log)
+python3 ports/tools/check-recipe-types.py createaddition   createaddition: ok
+python3 ports/tools/verify-sdk-package.py createaddition   1/1     (verify-sdk-package.log)
+```
+
+**Both `fits` lines are refusals, not a pass and a red** — unchanged since 0.2.9 (a
+`[[native.mixin]]` package is made for one build). The replacement evidence is the launcher build
+above plus `strings libcreateaddition.so` carrying `createaddition:copper_wire` (the new code, in the
+binary the game ran).
+
+In game, `tools/e2e-drop.sh` (default / `DROP_SELFTEST=1` / `CONTROL_GAME=`), plus the whole A–M
+suite on this build:
+
+```
+e2e-drop-default.log        PASS + EXIT:0   four rigs: copper, gold, electrum drop their own wire
+                                            ×4, the festive wire drops copper ×4, every peer reads
+                                            `links []`; the unlinked connector drops no wire
+e2e-drop-selftest.log       FAIL + EXIT:1   DROP_SELFTEST=1: the unlinked break dropped 0 wires, so
+                                            the differential's assertion fails — it can fail
+e2e-drop-control.log        FAIL + EXIT:1   a Nightly without the package cannot place
+                                            createaddition:connector
+e2e-drop-suite.log          PASS + EXIT:0   the A–M suite on 0.2.10, every earlier family green
+e2e-drop-suite-selftest.log FAIL + EXIT:1   the suite's conservation counterfactual is alive
+python3 ports/tools/check-e2e-logs.py createaddition-e2e --strict    logs=40 ok=40
+```
+
+Deliverable: `createaddition.hmod`, **190,180 B**, SHA-256
+`db4306b2ce83cbc58d0ce71919f87741285391ae1dd7f18dc39cdbce1c912f76`, **127 entries**, reproducible
+(repeated builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…95d`, packed too).
 
 ## 0.2.9 — the wire renderer, the wire family's client half
 

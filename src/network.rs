@@ -27,6 +27,7 @@ use mod_api::{
   move_energy,
 };
 
+use crate::render::{self, WireKind};
 use crate::runtime::{
   ACCUMULATOR_CAPACITY, ACCUMULATOR_TRANSFER, Connector, End, Link, Mode, Pool, Refusal, Wire,
   buffer_capacity, link as plan_link, placed_mode, pull_amount, push_amount,
@@ -404,6 +405,16 @@ impl Laying {
       Self::Festive => "festive",
     }
   }
+
+  /// The kind the renderer draws, with the jar's own colour for each (`WireType`'s RGB).
+  const fn drawn(self) -> WireKind {
+    match self {
+      Self::Copper => WireKind::Copper,
+      Self::Gold => WireKind::Gold,
+      Self::Electrum => WireKind::Electrum,
+      Self::Festive => WireKind::Festive,
+    }
+  }
 }
 
 // --- NBT ------------------------------------------------------------------
@@ -695,6 +706,64 @@ fn mounted(host: &dyn Host, level: LevelRef, pos: Pos) -> Option<(Pos, Direction
   let facing = level.block_property(host, pos, FACING)?;
   let facing = face_named(&facing)?;
   Some((offset(pos, facing), facing.opposite()))
+}
+
+/// Where a wire attaches on one of our blocks, in world coordinates: the point the jar's
+/// `getNodeOffset` gives. A connector's node is `3/16` out of the face it is mounted on; a
+/// relay's is `5/16` along its own axis (and `1/16` below its centre), and which of its two
+/// ports it is follows the peer's side exactly as the wire's own node index does
+/// (`relay_port_for_peer`).
+fn attach_point(host: &dyn Host, level: LevelRef, pos: Pos, kind: Kind, peer: Pos) -> [f64; 3] {
+  let centre = render::centre(pos);
+  let facing = level
+    .block_property(host, pos, FACING)
+    .and_then(|name| face_named(&name))
+    .unwrap_or(Direction::North);
+  if kind == Kind::Relay {
+    let vertical = level.block_property(host, pos, VERTICAL).as_deref() == Some("true");
+    let input = relay_port_for_peer(facing, vertical, pos, peer) == RelayPort::Input;
+    return render::attach_relay(centre, facing.normal(), vertical, input);
+  }
+  render::attach_connector(centre, facing.normal())
+}
+
+/// The wires this level's client draws, from the links the pass just read: one per pair — the
+/// lower position draws it, as upstream's `shouldRenderConnection` compares — each end attached
+/// at its own node. A peer outside this tick's read is aimed at its block's centre, the jar's
+/// answer for an unloaded other end.
+///
+/// The renderer is client-side and a single-player world's level ticks in this process, so the
+/// set the server holds here is the set the client draws. A dedicated server's client has no
+/// copy of it (this port syncs no block entity data), which is declared in `notes.md`.
+fn publish_wires(host: &mut dyn ServerHost, level: LevelRef, blocks: &[(Pos, Saved)]) {
+  let peers: BTreeMap<Pos, Kind> = blocks
+    .iter()
+    .map(|(pos, saved)| (*pos, saved.kind))
+    .collect();
+  let mut wires: Vec<render::Wire> = Vec::new();
+  for (pos, saved) in blocks {
+    if saved.kind.wire_node().is_none() {
+      continue;
+    }
+    for wire in saved_wires(&saved.nbt) {
+      if *pos >= wire.pos {
+        continue;
+      }
+      let to = match peers.get(&wire.pos) {
+        Some(peer_kind) if peer_kind.wire_node().is_some() => {
+          attach_point(host, level, wire.pos, *peer_kind, *pos)
+        }
+        _ => render::centre(wire.pos),
+      };
+      let from = attach_point(host, level, *pos, saved.kind, wire.pos);
+      wires.push(render::Wire {
+        from,
+        to,
+        kind: wire.wire.drawn(),
+      });
+    }
+  }
+  render::publish(level.dimension_id(), wires);
 }
 
 /// The level the server ticks now: the one a block entity's tick runs in.
@@ -1449,6 +1518,9 @@ pub(crate) fn level_ticked(
   // pass does: every accumulator block answers its tower's fraction, and a changed answer tells
   // the comparators beside it to read again.
   note_tower_signals(host, level, &blocks, &towers, signals);
+  // The client half: the links this tick read, for the renderer. Last, so it carries this
+  // tick's links and no earlier ones.
+  publish_wires(host, level, &blocks);
 }
 
 /// Record each accumulator's comparator answer for the hook and tell the comparators beside a

@@ -1,4 +1,86 @@
-# Validation — Create Crafts & Additions slices 1–9
+# Validation — Create Crafts & Additions slices 1–10
+
+## 0.2.9 — the wire renderer, the wire family's client half
+
+Pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (nightly 2026-11-20), mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`; every cargo step inside one
+`ports/tools/build-slot.sh` lease (`CARGO_INCREMENTAL=0`, no `--target-dir`); the package steps use
+`BUILD_LOCAL=1` because `cargo horizon-mod` is installed on this box only (the far runner has no
+`horizon-mod`). The in-game legs use the launcher-built game (`ports/tools/launcher-game.sh`,
+launcher 0.2.92); this build is `native-0a875da-3c69290c67cd`, and its build log shows
+`Compiling createaddition (1 of 1)` plus
+`Function replacement: 2 functions patched by 2 mixins, without rebuilding the game`
+(`wire-launcher-patch.log`).
+
+This is the campaign's first `[[native.mixin]]`: the render functions are native-route places
+outside `mod_api` at this pin, verified before the slice (route check in `notes.md` § *Slice 10*).
+
+Logs: `ports/_shared/evidence/createaddition/` (`wire-red.log`, `sdk-test.log`, `sdk-clippy.log`,
+`sdk-fmt.log`, `wire-build-1.log`, `wire-build-2.log`, `wire-check.log`, `wire-fits-pin.log`,
+`wire-fits-other.log`, `wire-launcher-build.log`, `wire-launcher-patch.log`,
+`verify-sdk-package.log`) and
+`ports/_shared/evidence/createaddition-e2e/` (`e2e-wire-*.log`).
+
+```
+red, pre-slice renderer           91 passed, 3 failed  (wire-red.log)
+  the WireType colour             left: [0, 0, 0]   right: [78, 37, 30]
+  the catenary                    a four-block wire sags by about 0.06, not 0
+  the festive lights              a festive wire draws its lights (576 vs 576 vertices)
+cargo test --offline              94 passed, 0 failed             (sdk-test.log, regenerated)
+cargo clippy --all-targets --offline -- -D warnings   exit 0, 0 warnings (sdk-clippy.log)
+cargo fmt --check                 clean                            (sdk-fmt.log)
+rm -f Cargo.lock && cargo horizon-mod build            exit 0       (wire-build-1.log)
+rm -f Cargo.lock && cargo horizon-mod build (again)    byte-identical (cmp) (wire-build-2.log)
+cargo horizon-mod check createaddition.hmod            0.2.9 … 187056 bytes (wire-check.log)
+fits --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a  "is made for exactly one build (it has a
+                                                       [native.mixin] table), so fits doesn't
+                                                       apply", exit 2   (wire-fits-pin.log)
+fits --build 0b14f8acfd97fa2c750e42795249dcc981178ca4  the same refusal, exit 2
+                                                                    (wire-fits-other.log)
+launcher-game.sh build createaddition   Compiling createaddition (1 of 1);
+                                        Function replacement: 2 functions patched by 2 mixins
+                                                                    (wire-launcher-build.log)
+python3 tools/data_shape.py createaddition.hmod   6/6 26.3 loot tables
+python3 tools/carry_content.py --check    assets/ and data/ match the jar carry
+python3 tools/check_licence.py    upstream notice verbatim
+python3 ports/tools/verify-sdk-package.py createaddition   1/1     (verify-sdk-package.log)
+```
+
+**The two `fits` lines are refusals, not a pass and a red.** A package with a `[[native.mixin]]`
+row compiles its helper into a copy of one game build's own source, so it is made for exactly that
+build and `fits` declines to answer for any build — the pin included. That is the route's cost;
+the evidence that replaces it is the launcher build above, which compiled and applied both mixins
+against `0a875da` and ran the game. 0.2.8's other-build line was red for the 0.2.5 lamp's
+`BlockStates::light_emission`; that API gap is unchanged, but `fits` no longer evaluates the
+surface for this package at all.
+
+Deliverable: `createaddition.hmod`, **187,056 B**, SHA-256
+`a9f4dcac05edbb72835f122f94514e034b41848aaa332266311bf8044a0e23e9`, **127 entries**, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f95d`, packed too).
+
+### In-game — five legs, `check-e2e-logs.py createaddition-e2e --strict`: logs=35 ok=35
+
+`tools/e2e-wire.sh` is the renderer's own leg (`--offscreen`, screenshots) and its three verdicts;
+`tools/e2e.sh` is the A–M suite, re-run whole on this package.
+
+```
+e2e-wire-default.log         PASS + EXIT:0   with the wire: 1901 green pixels, mean rgb(21, 86, 9);
+                                             without: 0; box x 356..923, y 514..538
+e2e-wire-negative.log        FAIL + EXIT:1   NEGATIVE: the no-wire frame carries 0 green pixels,
+                                             so a renderer that draws nothing fails this leg
+e2e-wire-control.log         FAIL + EXIT:1   a Nightly without the package does not know
+                                             createaddition:connector (setblock left minecraft:air)
+e2e-wire-suite.log           PASS + EXIT:0   A–M on 0.2.9, every earlier family unchanged
+e2e-wire-suite-selftest.log  FAIL + EXIT:1   the suite's conservation counterfactual is alive
+```
+
+The assertion is a count of festive-green pixels in the wire's own screen box, not a raw frame
+difference: the engine's brightness moves the floor's tone between two shots (measured: 25,600
+changed pixels of lighting), and the chat log redraws with every command (86,413 changed pixels).
+The green count is 1901 with the wire and 0 without it, and the wire's mean is the jar's
+`WireType.FESTIVE` 26/94/12 shaded by its own 0.7.
+
 
 ## 0.2.8 — the festive wire and spool (and the spool's pending-selection defect)
 

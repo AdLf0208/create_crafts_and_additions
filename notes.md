@@ -245,7 +245,8 @@ The ruling above is about the Java mod; a migration must not carry **our** bugs 
 - **Crafting**: no recipes (`CONTENT.md`) — the blocks are creative-only until
   the parent's items exist.
 - **Festive wire and spool**, the iron wire, and the electrum/brass/copper metal
-  items.
+  items. (All but the metal items are carried since 0.2.8; the wire is *drawn* since
+  0.2.9, § [`## Slice 10`](#slice-10--the-wire-renderer-029).)
 - **Contraption/Sable integration** (wires that follow a moving contraption).
 - **A 0.1.0 world's block entities do not survive the migration.** 0.1.0's entities were typed
   by their **block id** (the `block_entity` hook returned `(block_id, Compound)`); 0.2.0
@@ -2038,7 +2039,7 @@ double-refund assertion on the new kind.
 | the iron wire item | **tested** — in game `createaddition:iron_wire` held, and `link … iron` refused |
 | the festive spool's recipe | **not ported** — it needs `createaddition:biomass` (the rotation half) and `c:dusts/redstone` (`CONTENT.md`) |
 | the iron wire's recipes / the wire→spool recipes | **not ported** — they need `createaddition:spool` and `c:plates/iron`, which come from Create (`CONTENT.md`) |
-| the festive wire's string of lights (renderer) and the wire itself drawn at all | **not ported** — the client half; `native mod_render::render::world_drawn` is a raw frame place outside `mod_api` (next slice) |
+| the festive wire's string of lights (renderer) and the wire itself drawn at all | **tested in 0.2.9** — § [`## Slice 10`](#slice-10--the-wire-renderer-029) (a `[[native.mixin]]` at `horizon_mod_render::render::world_drawn`) |
 | a broken festive wire dropping `copper_wire x4` (`WireType.getDrop`) | **not ported** — the port has no break-drop path for wires (0.1.0 never had one either; recorded in `## Deviations`) |
 | the electrum/brass/copper metal items | **not ported** — crafting intermediates with no recipe that can match without Create |
 
@@ -2058,5 +2059,268 @@ double-refund assertion on the new kind.
    removed wire returns its spool; a broken connector loses its wires with the block entity, as
    since 0.1.0). `WireType.getDrop()` is therefore not exercised — it is the break path, and the
    break path is a gap this port already declared.
+
+## Slice 10 — the wire renderer (0.2.9)
+
+### The slice, and the gap line it comes from
+
+0.2.8's coverage table named it, and its report proposed it as the next slice:
+
+> **Gaps**: "the festive wire's string of lights (renderer) and the wire itself drawn at all —
+> **not ported** — the client half; `native mod_render::render::world_drawn` is a raw frame place
+> outside `mod_api` (next slice)"
+
+**Choice.** A laid wire is *invisible* in this port: the links move energy and draw nothing, while
+upstream's `WireNodeRenderer` draws every wire as a ribbon hung on the jar's catenary in its
+`WireType`'s RGB, and gives the festive wire a string of coloured lights. It is the last client
+half the wire family has and the one visible gap of a slice that otherwise works.
+
+**Tier fit.** `deep`: a client renderer in the frame's own wgpu encoder — a pipeline, a vertex
+buffer, the world's depth — with the jar's geometry (node offsets, catenary, ribbons, lights) as
+pure, unit-tested arithmetic in the package and the link set fed from the server's level pass. No
+block, no dimension, no new item.
+
+### The route, verified at the pin before any code
+
+The render function is **not** a `mod_api` hook at `0a875da`, so the earlier note was right about
+the boundary and wrong about nothing else; the route is a `[[native.mixin]]` and was proved before
+the slice:
+
+1. `hooks/world_drawn.rs` declares `hook:world_drawn` with `target = "mod_render::render::world_drawn"`,
+   side client, contract listen — and the name is **absent from the generated `Hooks` trait**
+   (`crates/horizon-mod-vocab/generated/mod_api_generated.rs`, 1505 `fn`s), so a package cannot
+   implement it. The catalogue entry is what a mixin names, not what a package overrides.
+2. The pin's book says so: `docs/modding/src/concepts/native-route/2-mixins.md` § *Render
+   functions* — "native-only, unstable raw frame places, outside `mod_api`. A native mod replaces
+   one with a `HEAD` mixin at `horizon_mod_render::render::<name>`"; `reference/manifest.md`:
+   "API function listeners use top-level `[[inject]]` … Native source edits use
+   `[[native.mixin]]` with `id`, `target`, uppercase `kind`, `helper`".
+3. The target is replaceable: `crates/horizon-mod-render/src/render.rs` carries
+   `#[horizon_mod_api_macros::replaceable]` on `world_drawn` and `render_needs`, which is the
+   marker `2-mixins.md` § *Naming the target* requires of a function below the game crate.
+4. The packer accepts the table: `cargo horizon-mod check` (folder) exit 0 with both rows.
+5. The launcher applies it without rebuilding the game: `Compiling createaddition (1 of 1)` and
+   `Function replacement: 2 functions patched by 2 mixins, without rebuilding the game (copy 68 ms,
+   horizon-mixins 101 ms, compile 1084 ms, total 1255 ms)` (`wire-launcher-patch.log`).
+
+The two rows in `horizon-mod.toml`:
+
+```toml
+[[native.mixin]]
+id = "wire-world-drawn"
+target = "horizon_mod_render::render::world_drawn"
+kind = "HEAD"
+helper = "src/mixins/world_drawn.rs"
+bindings = [{ name = "world", ty = "&mut WorldDrawn<'_>", value = "&mut *world" }]
+
+[[native.mixin]]
+id = "wire-render-needs"
+target = "horizon_mod_render::render::render_needs"
+kind = "HEAD"
+helper = "src/mixins/render_needs.rs"
+bindings = [{ name = "needs", ty = "&mut RenderNeeds", value = "&mut *needs" }]
+```
+
+The helper is compiled **into a copy of the game's render module** and calls this package's crate
+by its name (`createaddition::render`), which is why the geometry is testable without a game and
+the GPU calls live in the helper.
+
+### What it does
+
+- **Every laid wire, once.** The level pass reads each block's saved links, keeps the pair whose
+  other end has the lower position (upstream's `shouldRenderConnection` comparison), and attaches
+  each end at the jar's node: a connector's `3/16` of a block out of its mounting face, a relay's
+  `5/16` along its own axis and `1/16` below its centre, with the port taken from the peer's side
+  exactly as the wire's own node index is (`relay_port_for_peer`, already in the port).
+- **The jar's geometry.** `WireNodeRenderer`: 24 straight pieces, a slope-aware catenary
+  `sin(-part·PI) · (0.5 · distance / 16)`, a `0.025`-block cross-section, every other point at
+  70 % brightness, and — festive only — a light every third point, offset `-0.03` down, cycling
+  red/green/blue (the jar's `colors` and its `main` direction test).
+- **The jar's colours.** `WireType`'s RGB: copper 78/37/30, gold 98/83/29, electrum 88/66/37,
+  festive 26/94/12. The lights are the jar's red/green/blue at full brightness.
+- **The frame's own depth.** The pass attaches `WorldDrawn::depth` (reversed, `Greater`, no write)
+  so a wire is hidden by walls, and asks `render_needs` for `world_depth` — the second mixin. If
+  the frame's depth is smaller than its colour target (a lower-resolution world), the wire is
+  drawn without the depth test rather than into a mismatched pass.
+- **One pipeline per format.** The pipeline is built once per `(color_format, depth)` and kept in
+  the helper's own cache; the vertex buffer is rebuilt each frame from the pure vertex list.
+- **Single player and LAN hosts.** The set is published by the level's tick pass, so an integrated
+  server's client draws the links the server holds. A remote client has no copy (this port syncs
+  no block-entity data), declared under deviations — the same boundary the port already has.
+
+### Red → green (TDD)
+
+The rules went in first as the pre-slice behaviour a renderer without the jar's constants would
+have — a `WireType` colour table of `[0, 0, 0]`, no catenary (`hang` = 0) and no lights — and the
+tests were written against `WireNodeRenderer`'s own numbers. `wire-red.log`, verbatim:
+
+```
+thread 'render::tests::every_wire_kind_draws_in_its_own_wire_type_colour' panicked at src/render.rs:400:5:
+assertion `left == right` failed
+  left: [0, 0, 0]
+ right: [78, 37, 30]
+thread 'render::tests::a_wire_hangs_below_the_straight_line_by_the_jars_catenary' panicked at src/render.rs:434:5:
+a four-block wire sags by about 0.06, not 0
+thread 'render::tests::a_festive_wire_carries_its_string_of_lights_and_the_others_do_not' panicked at src/render.rs:468:5:
+a festive wire draws its lights (576 vertices against copper's 576)
+
+test result: FAILED. 91 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Green: **94 passed, 0 failed** (`sdk-test.log`, regenerated for 0.2.9; 84 → 94: ten new tests).
+They are the four `WireType` colours with the jar's 0.7 shading, the four-block catenary
+(`hang(0.5, 4) = -0.0625`), the endpoints the wire links, a vertical wire without the jar's
+division by zero, the festive lights (count and the red/green/blue cycle, and none on copper), the
+relay's eight node offsets against `RedstoneRelayBlockEntity`'s table and a connector's six, the
+cache's per-dimension replace, the uploaded vertex layout, and a wire behind the camera dropped
+whole. `src/runtime.rs` is untouched (`03721ca4…f95d`).
+
+Two defects the tests caught in this slice's own first draft: the relay's horizontal input/output
+pair for an east/west facing (the jar's `OFFSET_EAST`/`OFFSET_WEST` are the *output* on the facing
+side, and my first table had them the other way), and a projection test matrix written
+column-major wrong (a `w` row that made every quad vanish — the test failed as "a wire in front of
+the camera draws").
+
+### The 0.2.9 ladder
+
+| Step | Command | Result |
+|---|---|---|
+| tests | `cargo test --offline` | **94 passed**, 0 failed (`sdk-test.log`) |
+| red | the same against the pre-slice renderer | **91 passed, 3 failed**, exit 101 (`wire-red.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| formatting | `cargo fmt --check` | clean (`sdk-fmt.log`) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` | exit 0 (`wire-build-1.log`) |
+| package, second build | `rm -f Cargo.lock` + the same again | **byte-identical** (`cmp`) (`wire-build-2.log`) |
+| registry check | `cargo horizon-mod check createaddition.hmod` | exit 0, `0.2.9 … 187056 bytes` (`wire-check.log`) |
+| fits, campaign pin | `cargo horizon-mod fits … --build 0a875da…` | **`is made for exactly one build (it has a [native.mixin] table), so fits doesn't apply`**, exit 2 (`wire-fits-pin.log`) |
+| fits, another build | `… --build 0b14f8a…` | the same refusal, exit 2 (`wire-fits-other.log`) |
+| launcher build | `launcher-game.sh build createaddition` | `Compiling createaddition (1 of 1)`, `Function replacement: 2 functions patched by 2 mixins`, `native-0a875da-3c69290c67cd` (`wire-launcher-build.log`; the replacement line in `wire-launcher-patch.log`) |
+| data shape | `python3 tools/data_shape.py createaddition.hmod` | 6/6 loot tables in the 26.3 dialect |
+| content carry | `python3 tools/carry_content.py --check` | `assets/ and data/ match the jar carry` |
+| licence notice | `python3 tools/check_licence.py` | `ok … carries the upstream MIT notice verbatim` |
+| package verifier | `python3 ports/tools/verify-sdk-package.py createaddition` | **1/1** (`verify-sdk-package.log`) |
+
+**The two `fits` lines changed shape, and this is the route's price, not a regression.** 0.2.8's
+pin run said `0a875da made for` and its other-build run was red for the 0.2.5 lamp's
+`BlockStates::light_emission`. A package with a `[[native.mixin]]` row is bound to one game build —
+its helper is compiled into a copy of that build's own source — so `fits` refuses to answer for
+**either** build, naming the table. What replaces it as the compatibility evidence is the
+launcher build itself: the patch compiled and applied against `0a875da` and the game ran
+(`Function replacement: 2 functions patched by 2 mixins`), and repointing the pin is a deliberate
+`cargo horizon-mod update` + reread of the two target functions (`2-mixins.md`: "a target that was
+renamed or moved fails the build with an error naming your mod; a change elsewhere in a target's
+body is not reported").
+
+Deliverable: **`createaddition.hmod`, 187,056 B, SHA-256
+`a9f4dcac05edbb72835f122f94514e034b41848aaa332266311bf8044a0e23e9`**, **127 entries**,
+reproducible (two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f95d`, packed too).
+
+```
+createaddition 0.2.9 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  187056 bytes, SHA-256 a9f4dcac05edbb72835f122f94514e034b41848aaa332266311bf8044a0e23e9, unsigned
+```
+
+### In-game (`e2e-wire-default.log`, `PASS` + `EXIT:0`)
+
+A dedicated leg (`tools/e2e-wire.sh`) rather than a phase of the A–M run: the A–M run launches
+`--headless` (no renderer, no screenshots), and the wire is only visible in a rendered frame. The
+leg launches `--offscreen` on the same launcher-built game, builds its own pad in the End
+(chunk loaded before the `fill`), the rig `accumulator(268) – connector(269, facing west) – festive
+wire – connector(273, facing east) – accumulator(274)` at y=101, puts the player four blocks south
+at eye height (settled on the ground: a player still falling moves the camera and the whole scene
+with it) and looks at the point the wire hangs from.
+
+```
+== lay the festive wire ==
+  Connector at 269,101,0: mode pull, buffer 0/1000 FE, links [(273,101,0)/0/festive], pool 0/0, demand 0, t=147
+  camera settled at 271.5,101.0,4.5
+  with the wire: settled (two frames twenty ticks apart differ by 0 pixels)
+  with the wire: 1901 green-dominant pixels in the wire box, mean rgb(21, 86, 9)
+== take the wire out and take the same frame again ==
+  Connector at 269,101,0: mode pull, buffer 0/1000 FE, links [], pool 0/0, demand 0, t=572
+  without the wire: settled (two frames twenty ticks apart differ by 0 pixels)
+  without the wire: 0 green-dominant pixels in the same box
+  (the frames differ in 2002 pixels of the box overall, mean rgb(26, 82, 15): the floor's tone, not the wire)
+  frame size: 1280 x 720; the changed pixels' box: x 356..923, y 514..538
+PASS: the festive wire is drawn between its two connectors (1901 green pixels, mean rgb(21, 86, 9)) and is gone (0) once /createaddition unlink takes it out
+```
+
+Why these can fail: the count is of **festive-green** pixels in the wire's own screen box —
+rgb(21, 86, 9) is the jar's 26/94/12 shaded by its own 0.7, and nothing else in the End's void and
+this stone floor is green-dominant, so a frame drawn by a package that draws nothing counts 0
+(which is what `NEGATIVE=1` asserts and why it must fail). The box's 567 × 24 pixels are the wire's
+span (the sag and the lights), not the whole frame. The unlink's own effect is asserted twice: the
+connector's `info` line reads `links []` **and** the second frame's count is 0.
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-wire-default.log` | `PASS` + `EXIT:0` | the festive wire is drawn at its own colour (1901 green pixels, mean rgb(21,86,9)) and is gone (0) after the unlink |
+| `e2e-wire-negative.log` | `FAIL` + `EXIT:1` | `NEGATIVE`: the no-wire frame carries 0 green pixels, so a renderer that draws nothing fails this leg |
+| `e2e-wire-control.log` | `FAIL` + `EXIT:1` | a Nightly without the package does not know `createaddition:connector` (the setblock left `minecraft:air`), so the wire the modded frame counts comes from this package |
+| `e2e-wire-suite.log` | `PASS` + `EXIT:0` | the whole A–M suite on 0.2.9: the level pass that publishes the wires did not disturb a single earlier family |
+| `e2e-wire-suite-selftest.log` | `FAIL` + `EXIT:1` | the suite's conservation counterfactual is still alive |
+
+`python3 ports/tools/check-e2e-logs.py createaddition-e2e --strict`:
+**logs=35 ok=35 missing-exit=0 bad-exit=0** (the 30 earlier legs still green).
+
+Harness facts this slice cost a run each (kept here because the next screenshot leg will meet
+them): the chat log is drawn over the frame and its text changes with every command, so a raw
+frame difference measures the chat (86,413 changed pixels) — the wire box starts below it and the
+log is left to fade; the engine's own brightness shifts the floor's tone between two shots
+(25,600 changed pixels, all lighting), so the assertion is a colour count and the difference is
+only reported; chunks keep meshing after the camera arrives, so a frame is used only once two
+shots twenty ticks apart agree; and a teleport one block above the floor leaves the player falling,
+which moves the camera and the whole scene (45,786 changed pixels of floor in the first attempt).
+The launcher reuses a build when a package's files are unchanged, so the two `native-*` tags that
+carried 0.2.5 and 0.2.8 (`afdac794d1f6`, `bbeb13d53095`) were moved out of the versions folder
+before the build; the new tag is `3c69290c67cd` and the build log shows both the `Compiling
+createaddition (1 of 1)` line and the two patched functions.
+
+### Coverage added by this slice
+
+| family | status |
+|---|---|
+| every laid wire is drawn, once, between its two nodes | **tested** — in game: 1901 green pixels in the wire box with the wire, 0 without it |
+| the `WireType` colour of each kind (copper/gold/electrum/festive) | **tested** — `every_wire_kind_draws_in_its_own_wire_type_colour`; in game the mean is rgb(21, 86, 9) ≈ festive 26/94/12 × 0.7–1.0 |
+| the jar's catenary (24 pieces, `HANG`, the 16-block divisor) | **tested** — `a_wire_hangs_below_the_straight_line_by_the_jars_catenary` (midpoint −0.0625 for a 4-block wire) |
+| the festive string of lights (every third point, red/green/blue) | **tested** — `a_festive_wire_carries_its_string_of_lights_and_the_others_do_not`; visible in the frame |
+| a connector's node offset (3/16 out of its face) | **tested** — `a_connectors_node_is_three_sixteenths_out_of_its_mounting_face` |
+| a relay's eight node offsets, horizontal and vertical | **tested** — `a_relays_eight_nodes_are_where_redstone_relay_block_entity_puts_them` |
+| the wire set follows the links (and clears when they go) | **tested** — `a_wire_leaves_the_client_cache_when_the_level_it_belongs_to_changes`; in game 1901 → 0 after the unlink |
+| a vertical wire has no division by zero | **tested** — `a_vertical_wire_is_drawn_without_a_division_by_zero` |
+| the wire is hidden by walls (the world's depth) | **not proven in game** — the pass attaches `WorldDrawn::depth` with reversed comparison, but this leg's wire hangs in the open; a wall between camera and wire is the assertion that would prove it |
+| a wire on a remote (dedicated/LAN guest) client | **not ported** — the port syncs no block-entity data, so a remote client has no links to draw (deviation 5) |
+| the wire being placed (the spool's held-wire line to the player) | **not ported** — `clientRenderHeldWire`, upstream's preview of a wire being laid (`WireNodeRenderer.render`'s second half); a later slice |
+| the lightmap on a wire (block/sky light interpolation) | **not ported** — the wire is drawn at its type's colour without the jar's `LightTexture` interpolation (deviation 6) |
+
+### Deviations of this slice (declared)
+
+1. **The renderer is a `[[native.mixin]]`, not a hook.** At this pin the render functions are
+   native-route places outside `mod_api` (see the route check above). The consequence: `fits` no
+   longer answers for the package, and repointing the pin means rereading `world_drawn` and
+   `render_needs` at the new commit (`2-mixins.md`: a change inside a target's body is not
+   reported). One packaging consequence as well: a native-route package has **no uses table**, so
+   0.2.8's `uses.json` is gone from the archive — the entry count is 125 + 3 new sources − 1
+   `uses.json` = 127.
+2. **The pipeline is cached in the helper, keyed by the frame's colour format and depth choice.**
+   A format change (an HDR toggle) rebuilds it once; nothing else does.
+3. **Without a matching depth target the wire is drawn over the world.** When the frame's depth is
+   smaller than its colour target (a lower-resolution world), the pass cannot attach it and the
+   wire is not occluded. At 100 % resolution, which is the leg's and the usual case, it is.
+4. **The vertex list is rebuilt every frame** rather than kept in a GPU buffer: a wire network is a
+   handful of ribbons, and a buffer per frame costs one small allocation.
+5. **A remote client draws no wires.** The set is published by the level's tick pass in the
+   server's process; a dedicated server's client has no copy (this port has no block-entity sync
+   at all — the same boundary as its links, modes and charges on a client-only load).
+6. **No lightmap.** Upstream interpolates block and sky light along the wire; this port draws the
+   wire at its `WireType` colour (shaded 0.7 every other point), so a wire in a dark room is as
+   bright as one in daylight. The colour, the shape and the lights are the jar's.
+7. **The lights are two crossed flat quads, not the jar's `SMALL_LIGHT` model.** They cycle the
+   jar's red/green/blue every third point at the jar's `-0.03` offset; the model's own shape and
+   its per-light scale are not carried.
+8. **A wire whose peer this tick did not read is aimed at the peer's block centre**, as upstream
+   does for an unloaded other end (`WireNodeRenderer.render`: `getNodeOffset` or `Vec3.ZERO`).
+
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review

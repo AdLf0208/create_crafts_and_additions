@@ -1,6 +1,6 @@
 id = "createaddition"
 name = "Create Crafts & Additions"
-version = "0.2.8"
+version = "0.2.9"
 description = """Create's electric bridge, FE half: the two connectors with their spools and wire links (copper, gold, electrum and the festive wire, with the iron wire as the jar's own unwired item), the wire network that moves energy between them, the modular accumulator with its 3x3x5 multiblock tower and its comparator output, the redstone relay that bridges one wire network into another while powered, the small light connector whose lamp draws one FE a tick and lights while its network pays it, and the creative generator that gives without limit and fills every neighbour each tick. Partial port: Create's kinetic network, the rotation half (motor, alternator, rolling mill, tesla coil) and the client half are not carried."""
 authors = ["MRH0 (upstream)", "Horizon native mod contributors"]
 # The SDK package (mod API 0.2): one flat .hmod carrying the code in src/ and the
@@ -19,3 +19,23 @@ capabilities = ["registries"]
 game = "26.3"
 horizon = "0a875da91dbb0fdcb7ba8c42c11341aa229af51a"
 mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
+
+# The wire renderer. The render functions are native-route places, not `mod_api` hooks: they are
+# `horizon-mod-render`'s free functions, replaced by a HEAD mixin. The helpers are compiled into
+# a copy of the game's render module and call this package's own crate
+# (`createaddition::render`), which holds the geometry and the wire set the level pass fills.
+[[native.mixin]]
+id = "wire-world-drawn"
+target = "horizon_mod_render::render::world_drawn"
+kind = "HEAD"
+helper = "src/mixins/world_drawn.rs"
+bindings = [{ name = "world", ty = "&mut WorldDrawn<'_>", value = "&mut *world" }]
+
+# The wire's pass tests the world's depth, so it asks the renderer to keep it.
+[[native.mixin]]
+id = "wire-render-needs"
+target = "horizon_mod_render::render::render_needs"
+kind = "HEAD"
+helper = "src/mixins/render_needs.rs"
+bindings = [{ name = "needs", ty = "&mut RenderNeeds", value = "&mut *needs" }]
+

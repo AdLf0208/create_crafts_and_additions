@@ -11,6 +11,8 @@
 //! and tested by `cargo test` without the game. [`network`] is the glue: the block entity Part,
 //! the wire links and the commands.
 
+pub mod render;
+
 pub mod runtime;
 
 mod network;

@@ -11,20 +11,24 @@ rewrite, see `FINDINGS.md`).
 **LOCAL-ONLY** until the maintainer approves publishing (ARCHITECTURE.md §8).
 MIT is licence rank 0 (permissive); the approval is still required.
 
-Status: **slice 9 implemented and delivered as a flat SDK package (mod API 0.2), version
-0.2.8** — the two connectors, wire links and the modular accumulator, with the jar's rates and
+Status: **slice 12 implemented and delivered as a flat SDK package (mod API 0.2), version
+0.2.11** — the two connectors, wire links and the modular accumulator, with the jar's rates and
 connection rules, plus the **redstone relay** that bridges one wire network into another while
 powered, the **small light connector** whose lamp draws 1 FE a tick and lights while its network
 pays it, the accumulator's **comparator output** (the jar's fill fraction), the **creative
-generator** whose capability answers infinity and which fills every neighbour each tick, and the jar's
-**fourth wire, the festive spool**, with the iron wire carried as the unfitted item 1.7.2 ships, in
+generator** whose capability answers infinity and which fills every neighbour each tick, the jar's
+**fourth wire, the festive spool**, the **wire renderer** (the wire family's client half), the
+**wires a broken connector drops**, and the **lifecycle clears** that take a comparator answer out
+with its block, its chunk and its level (plus a spool selection with its level and its player), in
 one `createaddition.hmod` that carries the code *and* the content. (0.2.0
 was the migration; 0.2.2 the tower; 0.2.3 the three review fixes, §
 [`## Review fixes — 0.2.3`](#review-fixes--023-pr-1526-2026-11-21); 0.2.4 the relay, §
 [`## Slice 4 — the redstone relay (0.2.4)`](#slice-4--the-redstone-relay-024); 0.2.5 the lamp, §
 [`## Slice 5 — the small light connector (0.2.5)`](#slice-5--the-small-light-connector-025); 0.2.6
 the comparator, § [`## Slice 6 — the accumulator's comparator output (0.2.6)`](#slice-6--the-accumulators-comparator-output-026);
-0.2.7 the creative generator, § [`## Slice 8 — the creative generator (0.2.7)`](#slice-8--the-creative-generator-027).) The
+0.2.7 the creative generator, § [`## Slice 8 — the creative generator (0.2.7)`](#slice-8--the-creative-generator-027);
+0.2.8 the festive spool; 0.2.9 the wire renderer; 0.2.10 the break-drop path; 0.2.11 the lifecycle
+clears, § [`## Slice 12 — the lifecycle clears (0.2.11)`](#slice-12--the-lifecycle-clears-0211).) The
 0.1.0 `.hnmod` was retired by Horizon's mod-API merge (#16941); the migration is
 [`## Migration to the SDK format`](#migration-to-the-sdk-format), and the 0.1.0 in-game evidence
 stays historical (`## Gaps`).
@@ -92,8 +96,9 @@ stays historical (`## Gaps`).
   **DOWN** faces each tick (`tickOutput`), which is what a single block of the
   jar's tower does (both of its `top`/`bottom` bits set).
 - **Commands** — the harness's and an admin's interface, because the slice has
-  no GUI: `/createaddition info|energy|mode|link|unlink`, each reply optionally
-  tagged (`#tag`) so a harness can tell answers apart.
+  no GUI: `/createaddition info|energy|mode|link|unlink|signals`, each reply optionally
+  tagged (`#tag`) so a harness can tell answers apart (`signals`, 0.2.11, is the readout of the
+  answers the mod holds and the selections in progress — § *Slice 12*).
 - **`createaddition:creative_energy`** (0.2.7) — upstream's creative generator: its
   `ENERGY` capability answers `u32::MAX` stored and capacity, gives whatever is asked and takes
   nothing, so a connector mounted on it settles **pull**; and each tick it offers every one of
@@ -1510,6 +1515,8 @@ the assertion is alive` (`e2e-comparator-selftest.log`, `EXIT:1`).
 2. **The map is keyed by dimension id and position, and it is not pruned on break.** One entry per
    placed accumulator; a broken block's answer stays until the process ends. It is the answer the
    block would give, and pruning needs a break hook this Part does not have.
+   *(Fixed in 0.2.11 — the answer now goes with its block, its chunk and its level; § *Slice 12*,
+   after the reviewer held 0.2.6/0.2.7 for exactly this.)*
 3. **Every member answers; upstream answers through the controller.** Upstream's
    `getAnalogOutputSignal` maps the block entity to `getControllerBE()`, so a non-controller part
    reports the controller's fill; here each block of the tower answers the tower's fill directly.
@@ -2545,3 +2552,257 @@ the same command.
    which would conflate the two.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
+---
+
+## Slice 12 — the lifecycle clears (0.2.11)
+
+### The review finding this slice answers
+
+`NikitaMGrimm` reviewed the staged 0.2.6 and 0.2.7 archives and held them:
+
+> Both match the previously reviewed archives that **retain stale comparator entries after
+> accumulator removal, chunk unload and level close**. … make sure the replacement **clears the
+> affected entries on each of those lifecycle events**.
+
+It was true, and this port had declared it instead of fixing it: § *Slice 6*'s deviation 2 said "the
+map is keyed by dimension id and position, and it is **not pruned on break**. One entry per placed
+accumulator; a broken block's answer stays until the process ends." The register was empty on the
+other side too — the package subscribed to `register`, `level_tick_post`, `register_commands`,
+`run_mod_command` and the two render mixins, so **nothing** cleared a position-keyed entry.
+
+### The lifecycle events, measured against the pin's own declarations
+
+Read from `ports/_shared/sdk/0a875da/` (`surface.json` ids `hook:*` plus each
+`crates/horizon-mod-vocab/src/hooks/<name>.rs` doc) — not guessed:
+
+| event | hook | what it is told | why this one |
+|---|---|---|---|
+| an accumulator is removed or replaced | **`BlockPart::on_block_state_change`** (`IBlockExtension.onBlockStateChange`) | `dimension: LevelDimension`, `pos`, `state`, `old`, `new`, `predicted` | scoped to **our state's** parts, so no other block's writes reach it; heard at the end of every `Level.setBlock` the server makes (a break, `setblock air`, a piston, an explosion), with the dimension in the event |
+| a chunk unloads | **`Hooks::chunk_unload`** (`ChunkEvent.Unload`) | `dimension: &str`, `chunk: [i32; 2]` | the event names the dimension and the chunk column; the map is keyed by dimension and position, so the clear is one `retain` per unload and needs no block read |
+| a level closes | **`Hooks::level_unload`** (`LevelEvent.Unload`) | `dimension: &str` | "posted after `level.close()` in `MinecraftServer.stopServer`, after its last save: **drop what the mod kept for it**"; once per `level_load`, and for every level still open at a server stop — which is also the session's clear, because `chunk_unload` is **not** told at a world close |
+| a player leaves | **`Hooks::player_logged_out`** | `player: u128` | the spool selection is per player, so it goes with them |
+
+**Two candidates measured and rejected, with the reason:**
+
+- **`on_chunk_unloaded`** (`IBlockEntityExtension.onChunkUnloaded`, a `BlockEntityPart` method) is the
+  per-block-entity notice and would be exact for our entities — but its event carries **no dimension**
+  (`pos`, `block_entity`, `entity` only), and its own doc says a server's chunk "may have left the
+  level already, so **don't count on the handle's reads**". Deriving the dimension from the handle, or
+  from `host.dimension()` (which is "the level in place", not the level of the chunk being dropped),
+  would be a guess. `chunk_unload` states the dimension and the chunk, so it is the hook that fits.
+- **`world_saved` / `level_save`** are saves, not unloads. Clearing on a save would blank a live
+  comparator answer until the next pass (a wrong answer for a comparator that reads in between), so
+  they are **not** the clearing events — and the in-game leg asserts that a `/save-all` keeps the
+  answers (N5).
+
+### What it does
+
+- **`Signals` (`src/network.rs`) gains three clears and a count.** `forget(dimension, pos)` (block
+  removed), `forget_chunk(dimension, chunk)` (`retain` over the column: `pos[0].div_euclid(16)` and
+  `pos[2].div_euclid(16)`, so `x=-1` is chunk `-1`, not `0`), `forget_dimension(dimension)` (the whole
+  map of one level) and `counts()` (total plus per-dimension, name-ordered). An emptied dimension's
+  key is removed, so the map holds exactly the answers of blocks that exist.
+- **The removal hook is the accumulator's own Part.** `AccumulatorShape::on_block_state_change`
+  forgets the answer when `old` is our block and `new` is not, on the **server** side only (a client's
+  copy of a write is ignored: the answers are the server pass's).
+- **`Queue` follows its level out.** `forget_dimension` drops the positions queued for a closing
+  level; without it a level that closes with positions pending keeps them (and its `LevelRef`) for
+  the rest of the session.
+- **`Pending` (the spool's click in progress) is dropped** by `level_unload` (`clear`) and by
+  `player_logged_out` (`forget`): a half-made link cannot outlive the level it was made in or the
+  player who made it.
+- **`/createaddition signals`** is the observable: `Signals: answers=<n> dimensions=<dim>:<n>,… pending=<n>`.
+  It exists because a position-keyed entry whose block is gone has **no other** in-game read: a
+  comparator beside the air reads 0 whether the entry is stale or not, and the evicted chunk is not
+  loaded, so the mod's own count is the only thing that can show the entry went.
+- **No new API.** `chunk_unload`, `level_unload`, `player_logged_out` and
+  `on_block_state_change` are all at the pin (`mod_api_generated.rs`), and the package's
+  `[[native.mixin]]` render rows are unchanged.
+
+### Red → green (TDD)
+
+The rules went in first as the pre-slice behaviour — `forget`/`forget_chunk`/`forget_dimension`
+returning "nothing", `Pending::forget`/`clear` doing nothing, `counts()` empty — with six tests
+written against the events. `lifecycle-red.log`, verbatim:
+
+```
+thread 'network::tests::a_removed_accumulators_answer_is_forgotten_and_its_neighbours_are_not' (242841) panicked at src/network.rs:4391:5:
+the removed block's answer was there to forget
+thread 'network::tests::a_chunk_unload_forgets_that_chunks_answers_and_keeps_the_others' (242816) panicked at src/network.rs:4430:5:
+assertion `left == right` failed: both of the unloaded chunk's answers go
+  left: 0
+ right: 2
+thread 'network::tests::a_chunk_unload_reads_negative_coordinates_as_their_own_chunk' (242817) panicked at src/network.rs:4462:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+thread 'network::tests::a_level_unload_forgets_every_answer_of_that_dimension_only' (242835) panicked at src/network.rs:4481:5:
+assertion `left == right` failed: the closed level's answers go
+  left: 0
+ right: 2
+thread 'network::tests::the_selections_in_progress_are_dropped_when_their_level_closes_and_when_a_player_leaves' (242873) panicked at src/network.rs:4509:5:
+assertion `left == right` failed: a player who left keeps no selection in the mod
+  left: 2
+ right: 1
+thread 'network::tests::the_lifecycle_readout_counts_the_answers_it_holds' (242869) panicked at src/network.rs:4534:5:
+assertion `left == right` failed: per dimension, in name order, so the readout is deterministic
+  left: (0, [])
+ right: (3, [("minecraft:overworld", 1), ("minecraft:the_end", 2)])
+
+test result: FAILED. 99 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Green: **105 passed, 0 failed** (`lifecycle-test.log`; 99 → 105, the six new tests). The six: the
+removal (its own entry gone, the neighbour's and another dimension's kept), the chunk unload (both
+answers of the column gone, the block 40 y above it gone, the next chunk's and another dimension's
+kept), the negative-coordinate column (`x=-1` is chunk `-1`), the level unload (that dimension's
+gone, the other's kept, no empty map left), the selections (a logout forgets one player's, a level
+close drops every one), and the readout. `src/runtime.rs` is untouched (`03721ca4…f962`, packed
+too).
+
+### The 0.2.11 ladder
+
+| Step | Command | Result |
+|---|---|---|
+| red | `cargo test --offline` against the pre-slice clears | **99 passed, 6 failed**, exit 101 (`lifecycle-red.log`) |
+| tests | the same | **105 passed**, 0 failed (`sdk-test.log`, regenerated for 0.2.11) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| formatting | `cargo fmt --check` | clean (`sdk-fmt.log`; `src/runtime.rs` unchanged, `03721ca4…f962`) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` | exit 0 (`lifecycle-build-1.log`) |
+| package, second build | `rm -f Cargo.lock` + the same again | **byte-identical** (`cmp`) (`lifecycle-build-2.log`) |
+| registry check | `cargo horizon-mod check createaddition.hmod` | exit 0, `0.2.11 … 194450 bytes` (`lifecycle-check.log`) |
+| fits, campaign pin | `cargo horizon-mod fits … --build 0a875da…` | **`is made for exactly one build (it has a [native.mixin] table), so fits doesn't apply`**, exit 2 (`lifecycle-fits-pin.log`) |
+| fits, another build | `… --build 0b14f8a…` | the same refusal, exit 2 (`lifecycle-fits-other.log`) |
+| launcher build | `launcher-game.sh build createaddition` | `Compiling createaddition (1 of 1)`, `native-0a875da-05f84c083d3a` (`lifecycle-launcher-build.log`), and the launcher's own log: `Compiling createaddition: 8388 ms`, `Function replacement: 2 functions patched by 2 mixins, without rebuilding the game` (`lifecycle-launcher-patch.log`) |
+| launcher identity | `native-mods.json` of the built version | `{"id":"createaddition","version":"0.2.11",…}`, `libcreateaddition.so` identity `0a875da91dbb… createaddition 0.2.11 1.99.1`; `strings libcreateaddition.so` carries `Signals: answers` (the new code, in the binary the game ran) |
+| data shape | `python3 tools/data_shape.py createaddition.hmod` | 6/6 files in the 26.3 dialect |
+| content carry | `python3 tools/carry_content.py --check` | `assets/ and data/ match the jar carry` |
+| licence notice | `python3 tools/check_licence.py` | `ok … carries the upstream MIT notice verbatim` |
+| recipe types | `python3 ports/tools/check-recipe-types.py createaddition` | `createaddition: ok` |
+| package verifier | `python3 ports/tools/verify-sdk-package.py createaddition` | **1/1** — including `package matches the tree` (`verify-sdk-package.log`) |
+| e2e checker | `python3 ports/tools/check-e2e-logs.py createaddition-e2e --strict` | **logs=47 ok=47 missing-exit=0 bad-exit=0** |
+
+**Both `fits` lines are the route's refusals, not a regression** (unchanged since 0.2.9: a package
+with a `[[native.mixin]]` row is made for exactly one build). The compatibility evidence is the
+launcher build and the game it produced, which ran the lifecycle leg, the whole A–M suite and the
+renderer leg.
+
+Deliverable: **`createaddition.hmod`, 194,450 B, SHA-256
+`0b1b8184af405689c80154aacdc718949f701cc6466d473106e50a2c0705f6fc`**, **127 entries**,
+reproducible (two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too). The content is untouched (`assets/`/`data/` the same 118 files), so
+the entry count is 0.2.10's.
+
+```
+createaddition 0.2.11 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  194450 bytes, SHA-256 0b1b8184af405689c80154aacdc718949f701cc6466d473106e50a2c0705f6fc, unsigned
+```
+
+```
+Create Crafts & Additions is made for exactly one build (it has a [native.mixin] table), so `fits` doesn't apply.
+```
+
+### In-game (`e2e-lifecycle-default.log`, `PASS` + `EXIT:0`)
+
+A dedicated leg (`tools/e2e-lifecycle.sh`, after 0.2.10's `e2e-drop.sh`): no earlier leg can read a
+position-keyed cache, because the block it answered for is gone and the chunk it answered in is not
+loaded. The leg builds two rigs — an accumulator with a comparator on its `+z` side (facing north,
+reading it) and a wire behind that comparator — one at `300,101,0` and one at `1100,101,0`, 800
+blocks apart, the far one **force-loaded** (`/forceload add`) so both answers exist at once while
+only the near one can be evicted by a teleport. The assertion is `/createaddition signals`'s count
+plus the **survivor's** wire power:
+
+```
+== N: an accumulator's comparator answer is held while it is there ==
+  before anything is placed: Signals: answers=0 dimensions=none pending=0
+  the first accumulator's own comparator: redstone_wire at 300,101,2 power=8
+  two accumulators: Signals: answers=2 dimensions=minecraft:the_end:2 pending=0
+== N1: a removed accumulator's answer is forgotten, its neighbour's is not ==
+  after the removal: Signals: answers=1 dimensions=minecraft:the_end:1 pending=0
+  the removed accumulator's comparator (it now reads air): redstone_wire at 300,101,2 power=0
+== N2: a block placed where one was broken answers from a pass, not from the old entry ==
+  the re-placed accumulator: redstone_wire at 300,101,2 power=8
+  re-placed: Signals: answers=2 dimensions=minecraft:the_end:2 pending=0
+== N3: a chunk unload forgets that chunk's answers and keeps the loaded one's ==
+  after the unload: Signals: answers=1 dimensions=minecraft:the_end:1 pending=0
+  the accumulator whose chunk is still loaded: redstone_wire at 1100,101,2 power=8
+== N4: back on the pad, the pass records the answer again ==
+  back: Signals: answers=2 dimensions=minecraft:the_end:2 pending=0
+== N5: a save is not an unload — /save-all keeps the live answers ==
+  after save-all: Signals: answers=2 dimensions=minecraft:the_end:2 pending=0
+  the comparator after a save: redstone_wire at 300,101,2 power=8
+== N6: a relaunch carries no answer the new session did not compute ==
+  the survivor after the relaunch: redstone_wire at 1100,101,2 power=8
+  after the relaunch, at the survivor: Signals: answers=1 dimensions=minecraft:the_end:1 pending=0
+  both chunks loaded in the new session: Signals: answers=2 dimensions=minecraft:the_end:2 pending=0
+PASS: …
+EXIT:0
+```
+
+Why these can fail: the count is the mod's own state, so 2 → 1 can only come from the event being
+delivered and the entry removed — a package that keeps the entry (the reviewed archives) reads 2 at
+N1 and N3, and **N6 reads 2 at the survivor** (an entry carried across the session); the survivor's
+wire is read from the **world** (`ctl block`'s `state`, `power=8`), so a clear that took everything
+out fails there; N4's 2 after the reload is the pass recording again, so the clear cannot have been
+"the map is dead"; N5 is the negative for `world_saved`/`level_save` (a save must not clear); and
+`LIFECYCLE_SELFTEST=1` (`e2e-lifecycle-selftest.log`) inverts N3's assertion — the chunk unload must
+have left the answer — and exits 1 (`FAIL: LIFECYCLE_SELFTEST: the chunk unload forgot the answer
+(answers=1), so the eviction assertion is alive`).
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-lifecycle-default.log` | `PASS` + `EXIT:0` | 0 → 2 answers for two accumulators; a removal takes the broken one's (2 → 1) while its neighbour's wire still reads 8; a re-placed block is recorded again (1 → 2); a chunk unload takes that chunk's (2 → 1) while the still-loaded accumulator's wire reads 8; going back re-records it (1 → 2); `/save-all` keeps both; a relaunch holds only the answers the new session computed (1 at the survivor, 2 with both chunks loaded) |
+| `e2e-lifecycle-selftest.log` | `FAIL` + `EXIT:1` | N3's own counterfactual (`LIFECYCLE_SELFTEST`: the unloaded chunk's answer must still be there) |
+| `e2e-lifecycle-control.log` | `FAIL` + `EXIT:1` | a Nightly without the package cannot place `createaddition:modular_accumulator`, so the counts this leg reads come from this package |
+| `e2e-lifecycle-suite.log` | `PASS` + `EXIT:0` | the whole A–M suite on 0.2.11: every earlier family unchanged (the relay's 25,020 FE, the lamp's 1 FE/t, the comparator's 0/8/15, the generator's 1,000 FE/t, the festive wire, the break drops) |
+| `e2e-lifecycle-suite-selftest.log` | `FAIL` + `EXIT:1` | the suite's conservation counterfactual is still alive |
+| `e2e-lifecycle-wire.log` | `PASS` + `EXIT:0` | the renderer is not regressed: **1901** green-dominant pixels with the wire, mean `rgb(21, 86, 9)`, 0 without it |
+| `e2e-lifecycle-wire-negative.log` | `FAIL` + `EXIT:1` | the renderer's own counterfactual (a renderer that draws nothing fails the leg) |
+| `probe-lifecycle.log` | `EXIT:0` | measured that `/forceload add 1100 0` marks chunk `[68, 0]`, that the far accumulator is placed and **counted** (`answers=1`) 800 blocks from the player, and that `ctl block` answers `loaded:false` for a chunk only the **client** has not loaded (why the leg places rigs from anywhere and reads them only while standing beside them) |
+| `probe-lifecycle3.log` | `EXIT:0` | the relaunch: the same world comes back with both accumulators and their saved `energy: 1000000`, and the second session records both (2 answers) — the first N6 attempt failed because its `pad` re-fill erased the far rig, not because of the mod |
+
+### Coverage added by this slice
+
+| family | status |
+|---|---|
+| an accumulator's answer is forgotten when the block is removed or replaced | **tested** — `a_removed_accumulators_answer_is_forgotten_and_its_neighbours_are_not`, the in-game removal (N1) and its re-place (N2) |
+| …when its chunk unloads (the whole column, other chunks kept) | **tested** — `a_chunk_unload_forgets_that_chunks_answers_and_keeps_the_others`, `a_chunk_unload_reads_negative_coordinates_as_their_own_chunk`; in game N3 |
+| …when its level closes, and the session carries nothing | **tested** in the rules — `a_level_unload_forgets_every_answer_of_that_dimension_only`; in game N6 (a relaunch holds only what it computed) — the level unload itself is **not separately observable** (see deviation 3) |
+| a save is not an unload | **tested** in game — N5 (`/save-all` keeps 2 answers and the wire at 8) |
+| the tick queue does not keep a closed level | **tested** by the same `level_unload` path (`Queue::forget_dimension`); no unit test, because `LevelRef::dimension_id` needs the game's registry table (deviation 4) |
+| a spool selection is dropped by a level close and by a logout | **tested** — `the_selections_in_progress_are_dropped_when_their_level_closes_and_when_a_player_leaves`; the readout's `pending=` stays 0 in every in-game phase |
+| the readout itself (`/createaddition signals`) | **tested** — `the_lifecycle_readout_counts_the_answers_it_holds`; every in-game phase parses it |
+| `world_saved` as a clearing event | **measured and rejected** — a save is not an unload (N5 asserts it does not clear) |
+
+### Deviations of this slice (declared)
+
+1. **`chunk_unload`, not `on_chunk_unloaded`.** The per-block-entity notice would be exact for our
+   entities, but it carries no dimension (`pos`, `block_entity`, `entity`) and its own doc says a
+   server's chunk "may have left the level already, so don't count on the handle's reads". Deriving
+   the dimension from the handle or from `host.dimension()` (the level in place) would be a guess;
+   `chunk_unload` names the dimension and the chunk, so the clear is a `retain` with no read.
+2. **The removal clear is `on_block_state_change`, scoped to our block.** It fires for every
+   `Level.setBlock` on the server that changes our accumulator's state (a break, `setblock air`, a
+   piston, an explosion) — but not for a block removed without a state write, which is the chunk
+   unload case and is covered there.
+3. **A level close is unit-tested, not separately observable in game.** Every chunk of a closing
+   level unloads first (and `chunk_unload` clears those answers), and a world close ends the process,
+   so the map's contents cannot distinguish `level_unload` from the chunk clears that preceded it.
+   What the leg *can* show is the session's own half — a relaunch carries no answer (N6) — and the
+   rules test the level clear directly. The one thing the unit test cannot check is that the hook's
+   dimension string is the pass's key; N3 shows that for `chunk_unload` (the count fell when the
+   chunk left), and `level_unload`'s `dimension` comes from the same dimension-name table, so the
+   two hooks cannot name a level differently from each other.
+4. **`Queue::forget_dimension` has no unit test.** It compares `LevelRef::dimension_id()`, which
+   resolves through the game's registry table and panics without one, so a `cargo test` cannot build
+   the handle. It runs in the same `level_unload` call as the answers' clear, which is tested.
+5. **A level close drops every player's spool selection, not only one level's.** The selection is
+   keyed by player and does not carry its level (it is a click in progress, seconds long), so
+   `level_unload` clears the store rather than trying to attribute it. A logout drops its own.
+6. **The readout is a command, and that is deliberate.** No in-game read can show a position-keyed
+   entry whose block is gone (the comparator beside the air reads 0 either way, and the evicted chunk
+   is not loaded), so `/createaddition signals` reports the count. It is a level-0 player control
+   (read-only) and its reply is tagged like every other.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review

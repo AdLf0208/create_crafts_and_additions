@@ -20,8 +20,9 @@ mod network;
 use std::sync::{Arc, Mutex};
 
 use mod_api::{
-  self, Flow, Hooks, HostSide, LevelTickPostEvent, RegisterCommandsEvent, Registrar,
-  RegistrationContext, RunModCommandEvent, ServerHost,
+  self, ChunkUnloadEvent, Flow, Hooks, HostSide, LevelTickPostEvent, LevelUnloadEvent,
+  PlayerLoggedOutEvent, RegisterCommandsEvent, Registrar, RegistrationContext, RunModCommandEvent,
+  ServerHost,
 };
 
 use crate::network::{
@@ -124,13 +125,61 @@ impl Hooks for Mod {
     network::level_ticked(host, event.level, &queued, &self.signals);
   }
 
-  /// `/createaddition info|energy|link|unlink|mode`: the harness's readout and the controls the
-  /// GUI and Create's wrench would give a player (neither is in this slice).
+  /// `/createaddition info|energy|link|unlink|mode|signals`: the harness's readout and the controls
+  /// the GUI and Create's wrench would give a player (neither is in this slice).
   fn register_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
     event.commands.extend(network::command_declarations());
   }
 
-  /// Run the five usages [`Hooks::register_commands`] declares, after the game parsed and
+  /// A chunk left the world: the comparator answers of the accumulators in it go with it. The
+  /// event names the dimension and the chunk (`[x, z]`), so the clear needs no block read — a
+  /// chunk that leaves the server has already been saved and its handles read nothing.
+  ///
+  /// `chunk_unload`, not `on_chunk_unloaded`: that one is per block entity and carries no
+  /// dimension (only the block entity's handle, whose reads the hook's own doc says find nothing
+  /// on a server by then), and this map is keyed by the dimension's name.
+  fn chunk_unload(&self, _host: &mut dyn ServerHost, event: &mut ChunkUnloadEvent<'_>) {
+    let _ = self
+      .signals
+      .lock()
+      .expect("the createaddition comparator answers lock is held for one chunk unload")
+      .forget_chunk(event.dimension, event.chunk);
+  }
+
+  /// A level closed, after its last save: drop everything the mod kept for it. That is the
+  /// session's own clear as well — every open level closes this way when the server stops, before
+  /// `WorldCloseFinal`, and `chunk_unload` is not told at a world close.
+  fn level_unload(&self, _host: &mut dyn ServerHost, event: &mut LevelUnloadEvent<'_>) {
+    let _ = self
+      .signals
+      .lock()
+      .expect("the createaddition comparator answers lock is held for one level unload")
+      .forget_dimension(event.dimension);
+    let _ = self
+      .queue
+      .lock()
+      .expect("the createaddition tick queue lock is held for one level unload")
+      .forget_dimension(event.dimension);
+    // A spool's first click is a click in progress: no half-made link survives the level it was
+    // made in. The store is per player, so a close ends every player's (declared in `notes.md`).
+    let _ = self
+      .pending
+      .lock()
+      .expect("the createaddition pending-selection lock is held for one level unload")
+      .clear();
+  }
+
+  /// A player left: their spool selection was a click in progress, so it goes with them instead
+  /// of staying in the mod for the rest of the session.
+  fn player_logged_out(&self, _host: &mut dyn ServerHost, event: &mut PlayerLoggedOutEvent<'_>) {
+    self
+      .pending
+      .lock()
+      .expect("the createaddition pending-selection lock is held for one logout")
+      .forget(event.player);
+  }
+
+  /// Run the six usages [`Hooks::register_commands`] declares, after the game parsed and
   /// permission-checked them.
   fn run_mod_command(&self, host: &mut dyn ServerHost, event: &mut RunModCommandEvent<'_>) -> Flow {
     let literals: Vec<&str> = event.command.literals.iter().map(String::as_str).collect();
@@ -140,6 +189,9 @@ impl Hooks for Mod {
       ["createaddition", "link"] => network::command_link(host, event.command),
       ["createaddition", "unlink"] => network::command_unlink(host, event.command),
       ["createaddition", "mode"] => network::command_mode(host, event.command),
+      ["createaddition", "signals"] => {
+        network::command_signals(host, event.command, &self.signals, &self.pending)
+      }
       _ => return Flow::Continue,
     }
     Flow::Cancel

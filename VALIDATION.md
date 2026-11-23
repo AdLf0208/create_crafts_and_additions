@@ -1,6 +1,99 @@
-# Validation — Create Crafts & Additions slices 1–11
+# Validation — Create Crafts & Additions slices 1–12
+
+## 0.2.11 — the lifecycle clears (review fix: stale comparator entries)
+
+Pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (nightly 2026-11-20), mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`; every cargo/package step inside one
+`ports/tools/build-slot.sh` lease (`CARGO_INCREMENTAL=0`, no `--target-dir`), with `BUILD_LOCAL=1`
+(`cargo horizon-mod` is installed on this box only). In-game legs: the launcher-built game
+(`ports/tools/launcher-game.sh`, launcher 0.2.92).
+
+The finding, in the reviewer's own words: *"Both match the previously reviewed archives that retain
+stale comparator entries after accumulator removal, chunk unload and level close … make sure the
+replacement clears the affected entries on each of those lifecycle events."* The mapping the fix
+uses, measured from the pin's own hook declarations (not guessed), the red and the in-game proof are
+`notes.md` § *Slice 12*.
+
+```
+red, pre-slice (no clearing at all)   99 passed, 6 failed  (lifecycle-red.log)
+  a removed block's answer            "the removed block's answer was there to forget"
+  a chunk unload                      left: 0  right: 2
+  negative chunk coordinates          left: 0  right: 1
+  a level close                       left: 0  right: 2
+  a logout / a level close (Pending)  left: 2  right: 1
+  the readout                         left: (0, [])  right: (3, […])
+cargo test --offline                 105 passed, 0 failed             (sdk-test.log, regenerated)
+cargo clippy --all-targets --offline -- -D warnings   exit 0, 0 warnings (sdk-clippy.log)
+cargo fmt --check                    clean (empty)                   (sdk-fmt.log)
+rm -f Cargo.lock && cargo horizon-mod build            exit 0       (lifecycle-build-1.log)
+the same again (rm -f Cargo.lock)                      byte-identical (cmp)
+cargo horizon-mod check createaddition.hmod            0.2.11 … 194450 bytes (lifecycle-check.log)
+fits --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a  "is made for exactly one build (it has a
+                                                       [native.mixin] table), so fits doesn't
+                                                       apply", exit 2   (lifecycle-fits-pin.log)
+fits --build 0b14f8acfd97fa2c750e42795249dcc981178ca4  the same refusal, exit 2
+                                                                    (lifecycle-fits-other.log)
+launcher-game.sh build createaddition   native-0a875da-05f84c083d3a, `Compiling createaddition (1 of 1)`
+                                        (lifecycle-launcher-build.log); the launcher's own log:
+                                        `Compiling createaddition: 8388 ms` and
+                                        `Function replacement: 2 functions patched by 2 mixins,
+                                        without rebuilding the game`
+                                        (lifecycle-launcher-patch.log); identity
+                                        `{"id":"createaddition","version":"0.2.11",…}` and
+                                        `strings libcreateaddition.so` carries `Signals: answers`
+python3 tools/data_shape.py createaddition.hmod          6/6 in the 26.3 dialect
+python3 tools/carry_content.py --check                   assets/ and data/ match the jar carry
+python3 tools/check_licence.py                           upstream notice verbatim
+python3 ports/tools/check-recipe-types.py createaddition   createaddition: ok
+python3 ports/tools/verify-sdk-package.py createaddition   1/1     (verify-sdk-package.log,
+                                                                   incl. `package matches the tree`)
+python3 ports/tools/check-e2e-logs.py createaddition-e2e --strict   logs=47 ok=47 missing-exit=0
+                                                                   bad-exit=0
+```
+
+**Both `fits` lines are refusals, not a pass and a red** — unchanged since 0.2.9 (a package with a
+`[[native.mixin]]` row is made for exactly one build, its helpers being compiled into a copy of that
+build's own source). The replacement evidence is the launcher build (the mod recompiled and both
+mixins were re-applied against `0a875da`) and the game it produced, which ran the whole lifecycle leg
+and the A–M suite.
+
+Deliverable: `createaddition.hmod`, **194,450 B**, SHA-256
+`0b1b8184af405689c80154aacdc718949f701cc6466d473106e50a2c0705f6fc`, **127 entries**, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too).
+
+```
+createaddition 0.2.11 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  194450 bytes, SHA-256 0b1b8184af405689c80154aacdc718949f701cc6466d473106e50a2c0705f6fc, unsigned
+```
+
+```
+Create Crafts & Additions is made for exactly one build (it has a [native.mixin] table), so `fits` doesn't apply.
+```
+
+### In-game — the lifecycle leg, the A–M suite and the renderer
+
+`tools/e2e-lifecycle.sh` (default / `LIFECYCLE_SELFTEST=1` / `CONTROL_GAME=`), then the whole A–M
+suite and the renderer leg on this build:
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-lifecycle-default.log` | `PASS` + `EXIT:0` | two accumulators → `answers=2`; a removal takes the broken one's (`2 → 1`) while the neighbour's wire still reads `power=8`; a re-placed block is recorded again (`1 → 2`); a chunk unload takes that chunk's (`2 → 1`) while the still-loaded accumulator reads `power=8`; going back re-records it (`1 → 2`); `/save-all` keeps both; a relaunch holds only what it computed (1 at the survivor, 2 with both chunks loaded) |
+| `e2e-lifecycle-selftest.log` | `FAIL` + `EXIT:1` | `LIFECYCLE_SELFTEST: the chunk unload forgot the answer (answers=1), so the eviction assertion is alive` |
+| `e2e-lifecycle-control.log` | `FAIL` + `EXIT:1` | a Nightly without the package cannot place `createaddition:modular_accumulator`, so the counts come from this package |
+| `e2e-lifecycle-suite.log` | `PASS` + `EXIT:0` | A–M on 0.2.11: the relay's 25,020 FE conserved, the lamp's 1 FE/t, the comparator's 0/8/15, the generator's 1,000 FE/t, the festive wire's 1,000 FE/t, the break drops — no earlier family disturbed |
+| `e2e-lifecycle-suite-selftest.log` | `FAIL` + `EXIT:1` | the suite's conservation counterfactual is still alive |
+| `e2e-lifecycle-wire.log` | `PASS` + `EXIT:0` | the renderer is not regressed: **1901** green-dominant pixels with the wire (mean `rgb(21, 86, 9)`), 0 without it |
+| `e2e-lifecycle-wire-negative.log` | `FAIL` + `EXIT:1` | the renderer's counterfactual (a renderer that draws nothing fails) |
+| `probe-lifecycle.log`, `probe-lifecycle3.log` | `EXIT:0` | the geometry of the far rig (forceload marks chunk `[68, 0]`; `ctl block`'s `loaded:false` is the client's copy) and the relaunch (the same world returns with both accumulators and their saved `energy`) |
+
+**The level close is unit-tested, not separately observable in game** — every chunk of a closing
+level unloads first (and `chunk_unload` clears those answers) and a world close ends the process, so
+the map cannot distinguish `level_unload` from the clears that preceded it. The leg's relaunch phase
+covers the session's half (`notes.md` § *Slice 12*, deviations 3–4).
 
 ## 0.2.10 — the wires a broken connector drops
+
 
 Pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (nightly 2026-11-20), mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`; every cargo/package step inside one

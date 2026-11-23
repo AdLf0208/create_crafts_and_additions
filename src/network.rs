@@ -22,9 +22,9 @@ use mod_api::{
   self, AnalogOutputEvent, BlockEntityPart, BlockEntityTickEvent, BlockEntityTicksEvent, BlockKey,
   BlockPart, Command, CommandArgumentValue, CommandInvocation, Compound, Direction, ENERGY,
   HasAnalogOutputEvent, Host, HostBlockStates, HostTransaction, InteractionResult, ItemKey,
-  ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef, LightEmissionEvent, ModEnergyBuffer,
-  NeighbourUpdate, OnDestroyedByPlayerEvent, ServerHost, StateConstraint, StateForPlacementEvent,
-  Tag, Text, UseItemOnEvent, move_energy,
+  ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef, LevelSide, LightEmissionEvent,
+  ModEnergyBuffer, NeighbourUpdate, OnBlockStateChangeEvent, OnDestroyedByPlayerEvent, ServerHost,
+  StateConstraint, StateForPlacementEvent, Tag, Text, UseItemOnEvent, move_energy,
 };
 
 use crate::render::{self, WireKind};
@@ -842,6 +842,24 @@ impl Pending {
       self.at.remove(&player);
     }
   }
+
+  /// Forget `player`'s click in progress: they left the world (`player_logged_out`).
+  pub(crate) fn forget(&mut self, player: u128) {
+    self.at.remove(&player);
+  }
+
+  /// Drop every click in progress and say how many there were: a level closed, so no half-made
+  /// link can survive it (`level_unload`).
+  pub(crate) fn clear(&mut self) -> usize {
+    let count = self.at.len();
+    self.at.clear();
+    count
+  }
+
+  /// How many selections are in progress: the readout.
+  pub(crate) fn len(&self) -> usize {
+    self.at.len()
+  }
 }
 
 /// Positions whose block entity ticked this tick, per level, drained at that level's tick end.
@@ -859,6 +877,16 @@ impl Queue {
   /// Everything queued for `level`, in position order; empty afterwards.
   pub(crate) fn take(&mut self, level: LevelRef) -> BTreeSet<Pos> {
     self.pending.remove(&level).unwrap_or_default()
+  }
+
+  /// Forget what was queued for the level of `dimension`, which just closed: its tick can never
+  /// come again, so the positions would stay for the rest of the session.
+  pub(crate) fn forget_dimension(&mut self, dimension: &str) -> usize {
+    let before = self.pending.len();
+    self
+      .pending
+      .retain(|level, _| level.dimension_id() != dimension);
+    before - self.pending.len()
   }
 }
 
@@ -1101,6 +1129,30 @@ impl BlockPart for AccumulatorShape {
     if let Some(level) = answer {
       event.output = level;
     }
+  }
+
+  /// The accumulator an answer was computed for left the world (broken, replaced, pushed): forget
+  /// the answer, so a block placed there later cannot be read from a number computed for a block
+  /// that is gone, and the map cannot grow with every accumulator ever broken. The hook is scoped
+  /// to our block's own states, so no other block's write reaches it; the answers are the
+  /// server's, so a client's copy of a write is ignored.
+  fn on_block_state_change(&self, level: LevelSide<'_>, event: &mut OnBlockStateChangeEvent) {
+    let LevelSide::Server(host) = level else {
+      return;
+    };
+    if host.state_block(event.old) != Some(ACCUMULATOR)
+      || host.state_block(event.new) == Some(ACCUMULATOR)
+    {
+      return;
+    }
+    self
+      .signals
+      .lock()
+      .expect("the createaddition comparator answers lock is held for one removal")
+      .forget(
+        event.dimension.key().id(),
+        [event.pos.x, event.pos.y, event.pos.z],
+      );
   }
 }
 
@@ -2454,8 +2506,10 @@ fn tower_signal(tower: Tower, stored: i32) -> i32 {
 /// entity, so the pass computes the answer from the saved charges and this is what the hook
 /// reads back (the same split `functionalstorage` uses at this pin).
 ///
-/// One entry per placed accumulator; a broken block's entry is left behind (it is the answer the
-/// block would still give, and a reloaded chunk's comparator may ask before the next pass runs).
+/// One entry per placed accumulator. An answer is **not** kept past the thing it answers for: the
+/// block's removal, its chunk and its level each take it out (`mod`'s `on_block_state_change`,
+/// `chunk_unload`, `level_unload`), so a stale number can never answer for a block that is gone and
+/// the map cannot grow with the world.
 #[derive(Default)]
 pub(crate) struct Signals {
   levels: HashMap<String, HashMap<Pos, i32>>,
@@ -2478,6 +2532,63 @@ impl Signals {
   fn value(&self, dimension: &str, pos: Pos) -> Option<i32> {
     self.levels.get(dimension)?.get(&pos).copied()
   }
+
+  /// Forget `pos`'s answer: its block left the world. `true` when there was one.
+  fn forget(&mut self, dimension: &str, pos: Pos) -> bool {
+    let Some(answers) = self.levels.get_mut(dimension) else {
+      return false;
+    };
+    let forgotten = answers.remove(&pos).is_some();
+    let empty = answers.is_empty();
+    if empty {
+      self.levels.remove(dimension);
+    }
+    forgotten
+  }
+
+  /// Forget every answer in chunk `chunk` (`[x, z]`, in chunks — a chunk column holds every y) of
+  /// `dimension`: the chunk unloaded. How many went.
+  pub(crate) fn forget_chunk(&mut self, dimension: &str, chunk: [i32; 2]) -> usize {
+    let Some(answers) = self.levels.get_mut(dimension) else {
+      return 0;
+    };
+    let before = answers.len();
+    answers.retain(|pos, _| !in_chunk(*pos, chunk));
+    let gone = before - answers.len();
+    let empty = answers.is_empty();
+    if empty {
+      self.levels.remove(dimension);
+    }
+    gone
+  }
+
+  /// Forget every answer of `dimension`: its level closed. How many went.
+  pub(crate) fn forget_dimension(&mut self, dimension: &str) -> usize {
+    self
+      .levels
+      .remove(dimension)
+      .map_or(0, |answers| answers.len())
+  }
+
+  /// How many answers are held, and how many per dimension in name order: the `/createaddition
+  /// signals` readout, and the lifecycle assertion a harness can watch.
+  fn counts(&self) -> (usize, Vec<(&str, usize)>) {
+    let mut dimensions: Vec<(&str, usize)> = self
+      .levels
+      .iter()
+      .filter(|(_, answers)| !answers.is_empty())
+      .map(|(dimension, answers)| (dimension.as_str(), answers.len()))
+      .collect();
+    dimensions.sort_unstable_by_key(|(dimension, _)| *dimension);
+    let total = dimensions.iter().map(|(_, count)| count).sum();
+    (total, dimensions)
+  }
+}
+
+/// Whether `pos` stands in chunk `chunk` (`[x, z]`, in chunks): the column holds every y. A
+/// Euclidean division, so x=-1 is chunk -1 and not chunk 0.
+fn in_chunk(pos: Pos, chunk: [i32; 2]) -> bool {
+  pos[0].div_euclid(16) == chunk[0] && pos[2].div_euclid(16) == chunk[1]
 }
 
 /// The wire ports a block offers: a connector's one, a relay's two (its saved wires split by
@@ -2730,27 +2841,30 @@ fn run_network(
 
 // --- the commands ---------------------------------------------------------
 
-/// The five usages `/createaddition` declares. The optional `tag:word` is the harness's marker:
+/// The six usages `/createaddition` declares. The optional `tag:word` is the harness's marker:
 /// the reply names it, so a line from an earlier command cannot be read as this one's answer.
-pub(crate) fn command_usages() -> [&'static str; 5] {
+pub(crate) fn command_usages() -> [&'static str; 6] {
   [
     "createaddition info <pos:block_pos> [tag:text]",
     "createaddition energy <pos:block_pos> <amount:integer> [tag:text]",
     "createaddition link <pos:block_pos> <pos2:block_pos> <wire:word> [tag:text]",
     "createaddition unlink <pos:block_pos> <pos2:block_pos> [tag:text]",
     "createaddition mode <pos:block_pos> <mode:word> [tag:text]",
+    "createaddition signals [tag:text]",
   ]
 }
 
-/// The command tree: `info` and `mode` are ordinary player controls (level 0, with the reach
-/// check below), while `energy`, `link` and `unlink` are administrative writes that stand in for
-/// an item the player would have to hold (a spool) and are operator-only (level 2).
+/// The command tree: `info`, `mode` and `signals` are ordinary player controls (level 0; `info`
+/// and `mode` with the reach check below, `signals` a read-only count), while `energy`, `link` and
+/// `unlink` are administrative writes that stand in for an item the player would have to hold
+/// (a spool) and are operator-only (level 2).
 pub(crate) fn command_declarations() -> Vec<Command> {
   command_usages()
     .iter()
     .map(|usage| {
-      let player_control =
-        usage.starts_with("createaddition info") || usage.starts_with("createaddition mode");
+      let player_control = usage.starts_with("createaddition info")
+        || usage.starts_with("createaddition mode")
+        || usage.starts_with("createaddition signals");
       if player_control {
         Command::new(usage)
       } else {
@@ -2865,6 +2979,45 @@ pub(crate) fn command_info(host: &mut dyn ServerHost, command: &CommandInvocatio
     None => reply(tag, "No Create Crafts & Additions block there.".to_owned()),
   };
   feedback(host, &answer);
+}
+
+/// `/createaddition signals`: how many comparator answers the mod holds, per dimension, and how
+/// many spool selections are in progress. It is the lifecycle hooks' own readout — an answer that
+/// outlives its block, its chunk or its level shows up here as a count that did not fall — and the
+/// one in-game assertion the eviction of a position-keyed cache can make (the block itself is gone
+/// from the world and a comparator beside it reads the new block, so only the mod's count can show
+/// that the entry went).
+pub(crate) fn command_signals(
+  host: &mut dyn ServerHost,
+  command: &CommandInvocation,
+  signals: &Mutex<Signals>,
+  pending: &Mutex<Pending>,
+) {
+  let tag = tag_of(command);
+  // Both locks are taken for the readout and released before the reply, which goes through the
+  // host's command channel.
+  let (answers, dimensions, selections) = {
+    let known = signals
+      .lock()
+      .expect("the createaddition comparator answers lock is held for one readout");
+    let (answers, dimensions) = known.counts();
+    let dimensions = if dimensions.is_empty() {
+      "none".to_owned()
+    } else {
+      dimensions
+        .iter()
+        .map(|(dimension, count)| format!("{dimension}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+    };
+    let selections = pending
+      .lock()
+      .expect("the createaddition pending-selection lock is held for one readout")
+      .len();
+    (answers, dimensions, selections)
+  };
+  let line = format!("Signals: answers={answers} dimensions={dimensions} pending={selections}");
+  feedback(host, &reply(tag, line));
 }
 
 /// A block's line of text: an accumulator's charge, a connector's mode, buffer, links and
@@ -4327,6 +4480,173 @@ mod tests {
       signals.value("minecraft:the_end", pos),
       Some(15),
       "the tower's own answer is kept"
+    );
+  }
+
+  // --- the lifecycle: nothing position-keyed outlives its block, its chunk or its level ----
+
+  #[test]
+  fn a_removed_accumulators_answer_is_forgotten_and_its_neighbours_are_not() {
+    // The reviewer's first event: a broken (or `setblock`-replaced) accumulator. Its answer was
+    // kept for the rest of the session, so a block placed there later answered from a number
+    // computed for a block that is gone until the next pass overwrote it.
+    let mut signals = Signals::default();
+    let gone = [10, 100, 0];
+    let beside = [11, 100, 0];
+    let other_dim = "minecraft:overworld";
+    assert!(signals.note("minecraft:the_end", gone, 8));
+    assert!(signals.note("minecraft:the_end", beside, 15));
+    assert!(signals.note(other_dim, gone, 3));
+    assert!(
+      signals.forget("minecraft:the_end", gone),
+      "the removed block's answer was there to forget"
+    );
+    assert_eq!(
+      signals.value("minecraft:the_end", gone),
+      None,
+      "a removed accumulator's answer must not outlive it"
+    );
+    assert_eq!(
+      signals.value("minecraft:the_end", beside),
+      Some(15),
+      "the block beside it is still there and keeps its answer"
+    );
+    assert_eq!(
+      signals.value(other_dim, gone),
+      Some(3),
+      "the same coordinates in another dimension are another block"
+    );
+    assert!(
+      !signals.forget("minecraft:the_end", gone),
+      "a second removal finds nothing to forget"
+    );
+  }
+
+  #[test]
+  fn a_chunk_unload_forgets_that_chunks_answers_and_keeps_the_others() {
+    // The reviewer's second event: a chunk that unloads. Every accumulator in the column goes
+    // (the chunk holds every y), the next chunk keeps its answer, and another dimension's chunk
+    // with the same coordinates is another chunk.
+    let mut signals = Signals::default();
+    let inside = [300, 100, 0];
+    let above = [300, 140, 15];
+    let next_chunk = [318, 100, 0];
+    let other_dim = "minecraft:overworld";
+    assert!(signals.note("minecraft:the_end", inside, 8));
+    assert!(signals.note("minecraft:the_end", above, 0));
+    assert!(signals.note("minecraft:the_end", next_chunk, 9));
+    assert!(signals.note(other_dim, inside, 5));
+    assert_eq!(
+      signals.forget_chunk("minecraft:the_end", [18, 0]),
+      2,
+      "both of the unloaded chunk's answers go"
+    );
+    assert_eq!(signals.value("minecraft:the_end", inside), None);
+    assert_eq!(
+      signals.value("minecraft:the_end", above),
+      None,
+      "a chunk column is every y, so the block 40 above it goes too"
+    );
+    assert_eq!(
+      signals.value("minecraft:the_end", next_chunk),
+      Some(9),
+      "an accumulator in the next chunk keeps its answer"
+    );
+    assert_eq!(
+      signals.value(other_dim, inside),
+      Some(5),
+      "another dimension's chunk 18,0 is untouched"
+    );
+  }
+
+  #[test]
+  fn a_chunk_unload_reads_negative_coordinates_as_their_own_chunk() {
+    // `-1` is in chunk `-1` (`-16..-1`), not chunk 0: a shift that rounds the wrong way would
+    // forget the wrong column.
+    let mut signals = Signals::default();
+    let west = [-1, 100, -20];
+    let east = [1, 100, 0];
+    assert!(signals.note("minecraft:the_end", west, 4));
+    assert!(signals.note("minecraft:the_end", east, 6));
+    assert_eq!(signals.forget_chunk("minecraft:the_end", [-1, -2]), 1);
+    assert_eq!(signals.value("minecraft:the_end", west), None);
+    assert_eq!(
+      signals.value("minecraft:the_end", east),
+      Some(6),
+      "x=1 is chunk 0 and is not the unloaded one"
+    );
+  }
+
+  #[test]
+  fn a_level_unload_forgets_every_answer_of_that_dimension_only() {
+    // The reviewer's third event: a level that closes. Every answer of it goes, the other
+    // dimension's stay, and the dimension's name is not kept as an empty map.
+    let mut signals = Signals::default();
+    let a = [10, 100, 0];
+    let b = [40, 100, 0];
+    assert!(signals.note("minecraft:the_end", a, 8));
+    assert!(signals.note("minecraft:the_end", b, 2));
+    assert!(signals.note("minecraft:overworld", a, 7));
+    assert_eq!(
+      signals.forget_dimension("minecraft:the_end"),
+      2,
+      "the closed level's answers go"
+    );
+    assert_eq!(signals.value("minecraft:the_end", a), None);
+    assert_eq!(signals.value("minecraft:the_end", b), None);
+    assert_eq!(
+      signals.value("minecraft:overworld", a),
+      Some(7),
+      "the level that is still open keeps its answer"
+    );
+    assert_eq!(
+      signals.counts(),
+      (1, vec![("minecraft:overworld", 1)]),
+      "an emptied dimension leaves no entry behind"
+    );
+  }
+
+  #[test]
+  fn the_selections_in_progress_are_dropped_when_their_level_closes_and_when_a_player_leaves() {
+    // The player-keyed half the brief asks about: a spool's first click is a click in progress, so
+    // it must not survive the level it was made in or the player who made it.
+    let mut pending = Pending::default();
+    pending.put(7, Some(([1, 64, 3], 0)));
+    pending.put(9, Some(([4, 64, 6], 1)));
+    assert_eq!(pending.len(), 2);
+    pending.forget(7);
+    assert_eq!(
+      pending.len(),
+      1,
+      "a player who left keeps no selection in the mod"
+    );
+    assert_eq!(
+      pending.take(9),
+      Some(([4, 64, 6], 1)),
+      "the other player's click in progress is still theirs"
+    );
+    pending.put(9, Some(([4, 64, 6], 1)));
+    pending.put(7, Some(([1, 64, 3], 0)));
+    assert_eq!(pending.clear(), 2, "a level close drops every selection");
+    assert_eq!(pending.len(), 0);
+    assert_eq!(pending.clear(), 0, "clearing an empty set is free");
+  }
+
+  #[test]
+  fn the_lifecycle_readout_counts_the_answers_it_holds() {
+    // `/createaddition signals`: the count is what an in-game leg reads to see an entry go.
+    let mut signals = Signals::default();
+    assert_eq!(signals.counts(), (0, Vec::new()), "nothing recorded yet");
+    assert!(signals.note("minecraft:the_end", [300, 100, 0], 8));
+    assert!(signals.note("minecraft:the_end", [500, 100, 0], 2));
+    assert!(signals.note("minecraft:overworld", [0, 64, 0], 15));
+    assert_eq!(
+      signals.counts(),
+      (
+        3,
+        vec![("minecraft:overworld", 1), ("minecraft:the_end", 2)]
+      ),
+      "per dimension, in name order, so the readout is deterministic"
     );
   }
 

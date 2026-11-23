@@ -94,18 +94,25 @@ Each block drops itself when mined with a pickaxe (its own 26.3 loot table, and 
 
 ## Commands
 
-`/createaddition info|energy|link|unlink|mode …` are the harness's readout and the controls the GUI
-and Create's wrench would give a player. Every usage takes an optional trailing `tag:word`, which the
-reply repeats as ` [#tag]` so a harness can tell answers apart. The readout text is byte-identical to
-0.1.0's, so the scenario's existing assertions still match.
+`/createaddition info|energy|link|unlink|mode|signals …` are the harness's readout and the controls
+the GUI and Create's wrench would give a player. Every usage takes an optional trailing `tag:word`,
+which the reply repeats as ` [#tag]` so a harness can tell answers apart. The readout text is
+byte-identical to 0.1.0's, so the scenario's existing assertions still match; `signals` is newer and
+prints `answers=<n> dimensions=<dim>:<n>,… pending=<n>` — how many comparator answers the mod holds
+per dimension and how many spool selections are in progress (`pending=none` never appears; the
+dimension list is `none` when nothing is held).
+
+An accumulator's comparator answer is kept only as long as the accumulator is: the block's removal
+(`on_block_state_change`), its chunk's unload (`chunk_unload`) and its level's close (`level_unload`)
+each forget it, and a spool's first click is dropped when its level closes or its player leaves.
 
 ## Layout
 
 ```
-horizon-mod.toml               the only manifest and identity: id, version 0.2.8, api 0.2, [native]
+horizon-mod.toml               the only manifest and identity: id, version 0.2.11, api 0.2, [native]
 Cargo.toml                     one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/rustfmt.toml               tab_spaces = 2, the campaign's style (a root one is refused)
-src/lib.rs                     the one impl Hooks: register, level_tick_post, commands
+src/lib.rs                     the one impl Hooks: register, level_tick_post, the three lifecycle clears, commands
 src/network.rs                 game glue: the block entity Part, the wire links, the pass, commands
 src/runtime.rs                 the pure rules (30 tests), byte-identical to the retired bundle's (the fourth wire kind is glue, `network::Laying`)
 assets/createaddition/         92 files: blockstates, models, textures, items, lang

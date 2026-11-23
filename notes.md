@@ -11,13 +11,14 @@ rewrite, see `FINDINGS.md`).
 **LOCAL-ONLY** until the maintainer approves publishing (ARCHITECTURE.md §8).
 MIT is licence rank 0 (permissive); the approval is still required.
 
-Status: **slice 8 implemented and delivered as a flat SDK package (mod API 0.2), version
-0.2.7** — the two connectors, wire links and the modular accumulator, with the jar's rates and
+Status: **slice 9 implemented and delivered as a flat SDK package (mod API 0.2), version
+0.2.8** — the two connectors, wire links and the modular accumulator, with the jar's rates and
 connection rules, plus the **redstone relay** that bridges one wire network into another while
 powered, the **small light connector** whose lamp draws 1 FE a tick and lights while its network
-pays it, the accumulator's **comparator output** (the jar's fill fraction), and the **creative
-generator** whose capability answers infinity and which fills every neighbour each tick, in one
-`createaddition.hmod` that carries the code *and* the content. (0.2.0
+pays it, the accumulator's **comparator output** (the jar's fill fraction), the **creative
+generator** whose capability answers infinity and which fills every neighbour each tick, and the jar's
+**fourth wire, the festive spool**, with the iron wire carried as the unfitted item 1.7.2 ships, in
+one `createaddition.hmod` that carries the code *and* the content. (0.2.0
 was the migration; 0.2.2 the tower; 0.2.3 the three review fixes, §
 [`## Review fixes — 0.2.3`](#review-fixes--023-pr-1526-2026-11-21); 0.2.4 the relay, §
 [`## Slice 4 — the redstone relay (0.2.4)`](#slice-4--the-redstone-relay-024); 0.2.5 the lamp, §
@@ -1793,5 +1794,269 @@ a package without the per-tick push cannot do.
 4. **The push runs in the level pass, not in the block entity's own tick.** A block entity is out
    of the world during its tick at this pin, so the queue is the only route; the pass runs it after
    the towers form (an adjacent accumulator answers the pool) and before the wire networks move.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review
+
+---
+
+## Slice 9 — the festive wire and spool (0.2.8)
+
+### The slice, and the gap line it comes from
+
+This port's own gap list named it, and 0.2.7's report proposed it:
+
+> **Gaps**: "**Festive wire and spool**, the iron wire, and the electrum/brass/copper metal
+> items."
+
+**Choice.** The festive wire is the jar's **fourth** wire kind and the last wire family that needs
+no Create: `WireType.FESTIVE` is live, `assets/createaddition/models/item/festive_spool.json` and its
+5,660-byte texture are in the jar, the lang keys and the class strings are there, and the only rule
+it adds is one `if` in `IWireNode.connect`. The **iron wire** is carried with it as what 1.7.2
+actually ships — an item whose `WireType.IRON` *and* `IRON_SPOOL` are commented out, so there is no
+iron wire kind and no iron spool (proved in game, § *In-game*). The electrum/brass/copper metal
+items stay a gap: they are crafting intermediates whose only recipes need `c:plates/iron` and
+`create:` items, so they would be inert.
+
+**Tier fit.** `deep`: a fourth wire kind in the saved link format and the link rule, the empty
+spool's refund keyed by wire kind, two carried items with their models, textures, item definitions,
+declarations and lang, and an in-game proof of the rule. No block, no renderer, no dimension.
+
+### The wire types, as `WireType.java` reads them
+
+```
+COPPER(0, 256, 78, 37, 30, copper_wire x4, copper_spool)
+GOLD(1, 1024, 98, 83, 29, gold_wire x4, gold_spool)
+ELECTRUM(2, 8196, 88, 66, 37, electrum_wire x4, electrum_spool)
+FESTIVE(3, 256, 26, 94, 12, copper_wire x4, festive_spool)
+//IRON(4, 256, 87, 87, 87, CAItems.IRON_WIRE.asStack(4), CAItems.IRON_SPOOL.asStack());
+```
+
+- **The low/high-current sets are not fields**: `IWireNode.connect` says
+  `if(wn1.getConnectorType() == ConnectorType.Large && wn2.getConnectorType() == ConnectorType.Large) { if(type == WireType.COPPER || type == WireType.FESTIVE) return WireConnectResult.REQUIRES_HIGH_CURRENT; }`.
+  So **low current = {COPPER, FESTIVE}** (refused between two large connectors) and **high current
+  = {GOLD, ELECTRUM}**; a large↔small pair takes any of the four.
+- **There is no loss rate per wire kind.** `transfer()` (256 / 1024 / 8196 / 256) is read by
+  **nothing** in 1.7.2 — `grep -rn "\.transfer\b" src/main/java` finds only the getter — so the
+  throughput is the connector's (1,000 small / 5,000 large) and every wire, festive included,
+  carries exactly that. Already deviation 3 of this port; this slice re-measured it in game:
+  1,000 FE a tick over a festive wire.
+- `getDrop()` is `copper_wire x4` for festive (a broken festive wire drops copper wires);
+  `getSourceDrop()` is the **festive spool**, which is what the empty spool hands back.
+
+### What it does
+
+- **`createaddition:festive_spool`** — carried verbatim (its own model, its 5,660-byte texture, the
+  26.3 item definition, the `copper_ingot` declaration and the jar's six lang keys), and it lays
+  the jar's festive wire: `Laying::Festive`, saved as `type: "festive"`, printed by
+  `/createaddition info` as `(x,y,z)/node/festive`, and accepted by `/createaddition link … festive`.
+- **Low current, as copper.** `Laying::Festive.rule()` is [`Wire::Copper`], so the inherited link
+  rule refuses festive between two large connectors and accepts it everywhere else.
+- **A festive spool comes back.** The empty spool coils each wire onto its own spool, so removing a
+  festive link hands back one `createaddition:festive_spool` (`getSourceDrop()`), not a copper one.
+- **`createaddition:iron_wire`** — carried as content only: the jar registers the item and
+  `c:wires/all_metal` + `c:wires/iron` name it, while `WireType.IRON` and `CAItems.IRON_SPOOL` are
+  commented out. `/createaddition link … iron` therefore refuses (`The wire is copper, gold,
+  electrum or festive.`), which is the in-game proof that no iron kind was invented.
+- **No new API.** Nothing in this slice needs a hook the pin lacks; the second `fits` line is red
+  only for the 0.2.5 lamp's `light_emission` (below).
+
+### The wire kinds live in `network.rs`, not `runtime.rs`
+
+`src/runtime.rs` must stay byte-identical to the retired bundle's (this port's `AGENTS.md`, and
+every earlier slice kept it so: `03721ca4…f962`, packed too). Its [`Wire`] enum is the three-kind
+table the inherited link rule was written against, so the jar's fourth kind is `network::Laying`
+in the glue layer: `Copper | Gold | Electrum | Festive`, with `rule()` mapping festive onto copper's
+rule, `name()`/`of_name()` for the saved links, and `SavedWire.wire: Laying`. The mapping is
+unit-tested (`festive carries copper's rule`), so the two tables cannot drift silently.
+
+### Red → green (TDD)
+
+The rules went in first as the pre-slice behaviour — festive keyed by the rule it *would* borrow
+(`Wire::Gold`, as if festive were the other 256-transfer family's high-current sibling) and the
+refund keyed by that rule — with the tests written against `WireType`. `festive-red.log`, verbatim:
+
+```
+thread 'network::tests::a_festive_wire_is_refused_between_two_large_connectors_but_gold_is_not' (128257) panicked at src/network.rs:3927:5:
+assertion `left == right` failed: festive is refused between two large connectors exactly as copper is
+  left: Linked
+ right: Refused(RequiresHighCurrent)
+thread 'network::tests::an_empty_spool_hands_back_one_spool_of_each_wires_own_kind' (128282) panicked at src/network.rs:3856:5:
+assertion `left == right` failed: a festive wire coils back onto a festive spool, not onto a copper one (WireType.FESTIVE.getSourceDrop() is the festive spool)
+  left: [(Copper, 3), (Gold, 1), (Electrum, 0), (Festive, 0)]
+ right: [(Copper, 2), (Gold, 1), (Electrum, 0), (Festive, 1)]
+thread 'network::tests::the_festive_spool_lays_the_jars_fourth_wire' (128293) panicked at src/network.rs:3905:5:
+assertion `left == right` failed: festive carries copper's rule: 256 like COPPER, and `connect` tests them together
+  left: Gold
+ right: Copper
+
+test result: FAILED. 81 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Green: **84 passed, 0 failed** (`sdk-test.log`, regenerated for 0.2.8). The four new tests are the
+wire-type table as read (four names, `festive` in and `iron` out, festive's rule is copper's), the
+refusal between two large connectors with gold and electrum accepted, the saved link read back as
+`festive` and printed as `(5,64,2)/3/festive`, the refund keyed by the wire's own kind, and the
+spool's pending selection being the player's (below). `src/runtime.rs` is untouched
+(`03721ca4…f962`, packed too).
+
+### A port defect this slice found and fixed: the spool's first click
+
+The first in-game probe could not lay a wire at all, and the reason was **this port's**, not the
+jar's. `probe-festive.log` (0.2.7 code, the same click twice):
+
+```
+  probe: holding 1 festive spool(s), state createaddition:connector[facing=west,mode=pull]
+  probe: after the first click the spool reads {"count":1,"item":"createaddition:festive_spool","slot":0}
+{"components":"{\"minecraft:custom_data\":{createaddition:{node:0,x:269,y:102,z:0}}}","count":1,"item":"createaddition:festive_spool","slot":1}
+  probe: after the second click the spool reads {"count":1,"item":"createaddition:festive_spool","slot":0}
+{"components":"{\"minecraft:custom_data\":{createaddition:{node:0,x:269,y:102,z:0}}}","count":1,"item":"createaddition:festive_spool","slot":1}
+{"components":"{\"minecraft:custom_data\":{createaddition:{node:0,x:273,y:102,z:0}}}","count":1,"item":"createaddition:festive_spool","slot":2}
+  Connector at 269,102,0: mode pull, buffer 0/1000 FE, links [], pool 0/0, demand 0, t=238
+```
+
+One spool became **three**, each copy carrying a different click, and the hand kept a plain spool,
+so every click was a "first" click and no wire was ever laid. The port wrote the selection with
+`ItemPlace::edit`, which is an extract + insert; the insert of a stack whose components differ
+lands in the next free slot, so the hand never holds the selection. Upstream mutates the stack in
+place (`c.getItemInHand().set(DataComponents.CUSTOM_DATA, …)`), which the SDK does not offer.
+
+**Fix.** The selection is the **player's** now (`network::Pending`, keyed by `PlayerRef::uuid`), not
+the stack's: one selection per player (a second spool replaces it), cleared when the second click
+lays or when the same block is clicked again, and not saved with the world (it is a click in
+progress). The wire is still the kind of the stack that makes the second click, as
+`WireType.of(heldItem)` has it. Unit-tested by `a_players_first_spool_click_is_the_mods_and_not_the_stacks`,
+and the in-game proof is the phase below: one spool → one wire → exactly one empty spool.
+This bug also made the *copper* spool unusable in game since 0.2.0 — no earlier leg used the item
+(the commands stood in for it), so the wire family's item path had never been exercised.
+
+### The 0.2.8 ladder
+
+| Step | Command | Result |
+|---|---|---|
+| tests | `cargo test --offline` | **84 passed**, 0 failed (`sdk-test.log`) |
+| red | the same against the pre-slice rule | **81 passed, 3 failed**, exit 101 (`festive-red.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| formatting | `cargo fmt --check` | clean (`sdk-fmt.log`) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` | `target/horizon-mod/createaddition.hmod`, exit 0 (`festive-build-1.log`) |
+| package, second build | `rm -f Cargo.lock` + the same again | **byte-identical** (`cmp`) (`festive-build-2.log`) |
+| registry check | `cargo horizon-mod check createaddition.hmod` | exit 0, `0.2.8 … 186895 bytes` (`festive-check.log`) |
+| fits, campaign pin | `cargo horizon-mod fits … --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a` | `0a875da  made for`, exit 0 (`festive-fits-pin.log`) |
+| fits, another build | `… --build 0b14f8acfd97fa2c750e42795249dcc981178ca4` | **`does not fit: 1 item changed — the method BlockStates::light_emission (removed)`**, exit 1 (`festive-fits-other.log`) — 0.2.5's finding, unchanged |
+| data shape | `python3 tools/data_shape.py createaddition.hmod` | 6/6 loot tables in the 26.3 dialect |
+| content carry | `python3 tools/carry_content.py --check` | `assets/ and data/ match the jar carry` |
+| licence notice | `python3 tools/check_licence.py` | `ok … carries the upstream MIT notice verbatim` |
+| package verifier | `python3 ports/tools/verify-sdk-package.py createaddition` | **1/1** (`verify-sdk-package.log`) |
+
+Deliverable: **`createaddition.hmod`, 186,895 B, SHA-256
+`715ce0ea799f9ad7c16d8bbc33df8b6c3fcafa2057ddf03bf60b84620a5025a4`**, **125 entries**, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too). **114** `assets/`+`data/` files (was 106: two item models, two
+textures, two 26.3 item definitions, two item declarations; the lang file grew by two keys).
+
+```
+createaddition 0.2.8 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  186895 bytes, SHA-256 715ce0ea799f9ad7c16d8bbc33df8b6c3fcafa2057ddf03bf60b84620a5025a4, unsigned
+```
+
+```
+Create Crafts & Additions:
+0a875da  made for
+Create Crafts & Additions:
+0b14f8a  does not fit: 1 item changed
+    the method `BlockStates::light_emission` (removed)
+```
+
+The launcher rebuilt the game for this package (`native-0a875da-bbeb13d53095`) and printed
+`Compiling createaddition (1 of 1)`: the manifest bump is again what forces the recompile.
+
+### In-game (`e2e-festive-default.log`, `PASS` + `EXIT:0`; `== M`)
+
+The rig hangs at eye height on its own pad at x=268…284 (`accumulator(268) – connector(269, facing
+west) – festive wire – connector(273, facing east) – accumulator(274)`, plus the large pair at
+280/284), and the player stands beside it: a connector's outline is the 4×4-pixel nub on the face it
+is mounted on, so a click from the front must be almost horizontal — a player a block above the rig
+crosses the nub's band and the ray hits nothing (the two `probe-festive.log` runs that preceded the
+y=102 rig). The player is in survival from phase H's break leg, so the spool's **spend** path is the
+one exercised.
+
+```
+== M: the festive spool lays the jar's fourth wire; festive is low-current like copper ==
+  Connector at 269,102,0: mode pull, buffer 0/1000 FE, links [(273,102,0)/0/festive], pool 0/0, demand 0, t=2693
+  the two clicks laid a festive wire: Connector at 269,102,0: … links [(273,102,0)/0/festive] …
+  Connector at 273,102,0: mode pull, buffer 0/1000 FE, links [(269,102,0)/0/festive], pool 0/0, demand 0, t=2700
+  both ends save type 'festive'; the one festive spool became exactly one empty spool
+  -- it carries exactly 1,000 FE a tick, the same rate as copper
+  Modular Accumulator at 274,102,0: 13040/2000000 FE (t=2742)
+  Modular Accumulator at 274,102,0: 42040/2000000 FE (t=2771)
+  the festive wire carried 29000 FE over 29 game ticks (exactly 1000/tick; 20000 FE in the 20-tick window)
+  -- the differential: two large connectors refuse festive, and accept gold
+  Large Connector at 280,102,0: mode none, buffer 0/5000 FE, links [], pool 0/0, demand 0, t=2805
+  link 280-284 (festive): Two large connectors need a gold or electrum wire.
+  festive refused between two large connectors, as copper is
+  Large Connector at 280,102,0: mode none, buffer 0/5000 FE, links [], pool 0/0, demand 0, t=2819
+  -- the iron wire is content only: the item exists and no wire kind does
+  createaddition:iron_wire is held and /createaddition link refuses 'iron', as 1.7.2 has no IRON wire
+  -- the empty spool coils a festive wire back onto a festive spool
+  Connector at 269,102,0: mode pull, buffer 0/1000 FE, links [], pool 0/0, demand 0, t=2877
+  the empty spool removed the festive wire and gave back one festive spool (0 -> 1)
+```
+
+Why these can fail: the wire is laid by the **item**, not the command (`ctl interact` twice with
+`createaddition:festive_spool` in the hand), and both ends must save `festive` — the pre-slice code
+laid nothing at all; the gain is asserted to be **exactly** `1,000 × the ticks the two reads are
+apart` (29 → 29,000, i.e. 20,000 in the 20-tick wait), so a 2,000/tick or 0/tick wire fails; the
+large pair is the same refusal copper gets, with **gold accepted** on the same pair in the same
+tick, so a package that refused both would fail; `FESTIVE_SELFTEST=1` inverts the refusal
+(`FAIL: FESTIVE_SELFTEST: festive was refused between two large connectors (Two large connectors
+need a gold or electrum wire.), so the refusal assertion is alive`, `e2e-festive-selftest.log`); and
+the empty spool must hand back **exactly one** festive spool (0 → 1), which is the 0.1.0
+double-refund assertion on the new kind.
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-festive-default.log` | `PASS` + `EXIT:0` | A–L unchanged in this run (the relay carried **25,020 FE** conserved, the lamp drew 1 FE/t over 43 ticks, the comparator read 0/8/15, the generator exactly 1,000 FE/t over 28 ticks), plus **M**: the festive spool lays a wire both ends save as `festive`, one spool → one empty spool, exactly 1,000 FE/t over 29 ticks, festive refused between two large connectors with gold accepted, `createaddition:iron_wire` held while `link … iron` is refused, and the empty spool returning one festive spool |
+| `e2e-festive-selftest.log` | `FAIL` + `EXIT:1` | M's own counterfactual (`FESTIVE_SELFTEST`) |
+| `e2e-festive-suite-selftest.log` | `FAIL` + `EXIT:1` | the suite's conservation counterfactual (`SELFTEST`), still alive |
+| `e2e-festive-control.log` | `FAIL` + `EXIT:1` | a game without the package has no accumulator item; the default run's control leg also refuses `createaddition:festive_spool` and `createaddition:iron_wire` by id |
+| `probe-festive.log` | `PASS` + `EXIT:0` | the probe that found the pending-selection defect (three spools, no wire) and pinned the click geometry (`FESTIVE_ONLY=1`) |
+
+`python3 ports/tools/check-e2e-logs.py createaddition-e2e --strict`:
+**logs=30 ok=30 missing-exit=0 bad-exit=0** (the 29 earlier legs still green).
+
+### Coverage added by this slice
+
+| family | status |
+|---|---|
+| the jar's four wire kinds, named and mapped to their rules | **tested** — `the_festive_spool_lays_the_jars_fourth_wire` (four names; `iron` and `Iron` are not wire kinds; festive's rule is copper's) |
+| festive is low-current: refused between two large connectors, gold/electrum accepted | **tested** — `a_festive_wire_is_refused_between_two_large_connectors_but_gold_is_not`; in game M's refusal + gold on the same pair + `FESTIVE_SELFTEST` |
+| a festive link is saved and read back as `festive` | **tested** — `a_festive_wire_is_saved_and_read_back_under_its_own_name`; in game both ends' `info` lines |
+| the festive spool lays the wire (the item path, not the command) | **tested** — in game `ctl interact` twice with the item, `links [(273,102,0)/0/festive]` |
+| the empty spool refunds a festive spool | **tested** — `an_empty_spool_hands_back_one_spool_of_each_wires_own_kind`; in game 0 → 1 |
+| one wire spool becomes exactly one empty spool | **tested** — `the_last_wire_spool_becomes_the_empty_spool_and_is_not_given_twice`; in game the hand's count |
+| the spool's first click is the player's, not the stack's | **tested** — `a_players_first_spool_click_is_the_mods_and_not_the_stacks`; in game the probe's before/after |
+| a festive wire carries exactly the connector's 1,000 FE/t | **tested** — in game M's `29000 FE over 29 game ticks` |
+| the iron wire item | **tested** — in game `createaddition:iron_wire` held, and `link … iron` refused |
+| the festive spool's recipe | **not ported** — it needs `createaddition:biomass` (the rotation half) and `c:dusts/redstone` (`CONTENT.md`) |
+| the iron wire's recipes / the wire→spool recipes | **not ported** — they need `createaddition:spool` and `c:plates/iron`, which come from Create (`CONTENT.md`) |
+| the festive wire's string of lights (renderer) and the wire itself drawn at all | **not ported** — the client half; `native mod_render::render::world_drawn` is a raw frame place outside `mod_api` (next slice) |
+| a broken festive wire dropping `copper_wire x4` (`WireType.getDrop`) | **not ported** — the port has no break-drop path for wires (0.1.0 never had one either; recorded in `## Deviations`) |
+| the electrum/brass/copper metal items | **not ported** — crafting intermediates with no recipe that can match without Create |
+
+### Deviations of this slice (declared)
+
+1. **The four wire kinds live in `network.rs` (`Laying`), not in `runtime.rs`.** `runtime.rs` is the
+   frozen inherited truth (byte-identity rule), so the jar's fourth kind is glue and borrows
+   copper's rule through `Laying::rule()`; a test pins the mapping.
+2. **The spool's pending selection is the player's, not the stack's** (the port defect above): one
+   per player, not saved, cleared by the second click. What a player notices: two spools cannot hold
+   two different selections at once, and swapping a spool for another mid-link uses the new kind.
+3. **The festive wire has no renderer, like every other wire in this port.** Upstream draws the wire
+   and, for festive, a string of coloured lights (`WireNodeRenderer`); a package draws through
+   `mod_render::render::world_drawn`, a raw frame place outside `mod_api` that needs a native mixin —
+   recorded as the next slice, not faked.
+4. **A removed festive wire drops copper wires?** No: the port has no wire-drop path at all (a
+   removed wire returns its spool; a broken connector loses its wires with the block entity, as
+   since 0.1.0). `WireType.getDrop()` is therefore not exercised — it is the break path, and the
+   break path is a gap this port already declared.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review

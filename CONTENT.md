@@ -2,7 +2,7 @@
 
 `tools/carry_content.py` re-derives the whole tree from
 `ports/_shared/licence-cache/createaddition-1.7.2.jar`; `--check` rebuilds it in
-a temporary folder and exits 1 if `assets/`, `data/` or the harvest tag differs. **106 files**
+a temporary folder and exits 1 if `assets/`, `data/` or the harvest tag differs. **114 files**
 (the jar's `assets/` + `data/` for the slice, plus the one `minecraft` tag file and the two
 textures the script draws) at the **package root**, carried into `assets/createaddition/`,
 `data/createaddition/` and `data/minecraft/` of the SDK package, which packs them with the code
@@ -14,10 +14,10 @@ gone). `python3 tools/carry_content.py --check` prints `assets/ and data/ match 
 | What | From the jar | Note |
 |---|---|---|
 | Block models | `assets/createaddition/models/block/connector/{small,large}/{none,pull,push,item,block}.json`, `…/connector/small_light/{none,none_off,pull,pull_off,push,push_off,item}.json`, `…/modular_accumulator/{block_single,block_top,block_middle,block_bottom,item}.json`, `…/redstone_relay/{redstone_relay_off,redstone_relay_on,item}.json`, `…/creative_energy/{block,item}.json` | elements and UVs untouched; the multiblock models are the tower's own (0.2.2), the relay's its on/off pair (0.2.4), the lamp's its lit/dark six (0.2.5), the generator's its two-element crate (0.2.7) |
-| Item models | `…/models/item/{connector,large_connector,small_light_connector,modular_accumulator,redstone_relay,creative_energy,copper_wire,gold_wire,electrum_wire,spool,copper_spool,gold_spool,electrum_spool}.json` | `item/generated` where the jar has it |
-| Textures | 25 jar PNGs, every texture a carried model names, plus the lamp's lit and dark bulb and the accumulator gauge; **two generated** for the creative generator (`block/creative_energy/{crate,tank}.png`) | the jar's generator model names `create:block/crate_creative` and `create:block/creative_fluid_tank`, which are **Create's** art and not in this artefact: `carry_content.py` draws two deterministic 16×16 PNGs and points the model at them (0.2.7) |
+| Item models | `…/models/item/{connector,large_connector,small_light_connector,modular_accumulator,redstone_relay,creative_energy,copper_wire,gold_wire,electrum_wire,iron_wire,spool,copper_spool,gold_spool,electrum_spool,festive_spool}.json` | `item/generated` where the jar has it; `festive_spool`'s names only `createaddition:item/festive_spool`, which **is** in the jar (5,660 B, carried verbatim — unlike the creative generator's, no texture is drawn) |
+| Textures | 27 jar PNGs, every texture a carried model names, plus the lamp's lit and dark bulb and the accumulator gauge; **two generated** for the creative generator (`block/creative_energy/{crate,tank}.png`) | the jar's generator model names `create:block/crate_creative` and `create:block/creative_fluid_tank`, which are **Create's** art and not in this artefact: `carry_content.py` draws two deterministic 16×16 PNGs and points the model at them (0.2.7) |
 | Loot tables | `data/createaddition/loot_table/blocks/{connector,large_connector,small_light_connector,modular_accumulator,redstone_relay,creative_energy}.json` | **converted** to 26.3's shape, see below |
-| Lang | 33 keys from `assets/createaddition/lang/en_us.json` | names (the relay's, the lamp's and the generator's included), the spool tooltips, the wire status lines, the energy and relay tooltips |
+| Lang | 35 keys from `assets/createaddition/lang/en_us.json` | names (the relay's, the lamp's, the generator's, the festive spool's and the iron wire's included), the spool tooltips, the wire status lines, the energy and relay tooltips |
 | Harvest tag | `data/minecraft/tags/block/mineable/pickaxe.json` | the jar lists all 17 blocks it registers; this package lists its own six |
 
 ## Converted from 1.21.1 to 26.3 (the jar is right, the dialect is not)
@@ -65,8 +65,8 @@ gone). `python3 tools/carry_content.py --check` prints `assets/ and data/ match 
    as their template (stack size and look only; the carried model overrides the
    look).
 5. **26.3 item definitions** (`assets/createaddition/items/*.json`) are written
-   for the twelve items (the relay and the lamp included), as the pin's schema
-   requires.
+   for the fourteen items (the relay's, the lamp's, the festive spool's and the iron wire's
+   included), as the pin's schema requires.
 
 ## Not carried
 
@@ -78,12 +78,12 @@ gone). `python3 tools/carry_content.py --check` prints `assets/ and data/ match 
   `tools/data_shape.py` checks that form for the slices that do carry recipes.
 - **The `charging/` recipe type** and its 40+ oxidisation recipes: they belong
   to the rotation half (the electric motor powers them).
-- **`creative_energy`, `portable_energy_interface`, `energy_meter`,
-  `electric_pump`, `digital_adapter`**, the
-  cables/spools of iron and festive wire, and the electrum/brass/copper metal
-  items: other slices. (`redstone_relay` moved out of this list in 0.2.4;
-  `creative_energy` moved out in 0.2.7, with its model's Create textures drawn
-  by `carry_content.py` instead of carried.)
+- **`portable_energy_interface`, `energy_meter`, `electric_pump`,
+  `digital_adapter`**, an iron spool (upstream comments it out) and the
+  electrum/brass/copper metal items: other slices. (`redstone_relay` moved out of this list in
+  0.2.4; `creative_energy` in 0.2.7, with its model's Create textures drawn by
+  `carry_content.py` instead of carried; `festive_spool` and `iron_wire` in 0.2.8. The festive
+  spool's model names only this mod's own texture, which the jar ships — nothing was drawn.)
 - **`minecraft:needs_iron_tool` and the `incorrect_for_*_tool` tags**: the jar
   lists only `createaddition:electrum_block` in them, which this slice does not
   carry.

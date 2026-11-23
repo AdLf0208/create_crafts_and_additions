@@ -1,4 +1,73 @@
-# Validation — Create Crafts & Additions slices 1–8
+# Validation — Create Crafts & Additions slices 1–9
+
+## 0.2.8 — the festive wire and spool (and the spool's pending-selection defect)
+
+Pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (nightly 2026-11-20), mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`; every cargo step inside one
+`ports/tools/build-slot.sh` lease (`CARGO_INCREMENTAL=0`, no `--target-dir`); the package steps use
+`BUILD_LOCAL=1` because `cargo horizon-mod` is installed on this box only (the far runner has no
+`horizon-mod`). The in-game legs use the launcher-built game (`ports/tools/launcher-game.sh`,
+launcher 0.2.92, `Compiling createaddition (1 of 1)`); this build is `native-0a875da-bbeb13d53095`.
+
+Logs: `ports/_shared/evidence/createaddition/` (`festive-red.log`, `festive-build-1.log`,
+`festive-build-2.log`, `festive-check.log`, `festive-fits-pin.log`, `festive-fits-other.log`,
+`sdk-test.log`, `sdk-clippy.log`, `sdk-fmt.log`, `verify-sdk-package.log`) and
+`ports/_shared/evidence/createaddition-e2e/` (`e2e-festive-*.log`, `probe-festive.log`).
+
+```
+red, pre-slice festive rules     3 failed: 81 passed  (festive-red.log)
+  festive between two large      left: Linked   right: Refused(RequiresHighCurrent)
+  the empty spool's refund       left: [(Copper, 3) … (Festive, 0)]
+                                 right: [(Copper, 2) … (Festive, 1)]
+  festive's rule                 left: Gold   right: Copper
+cargo test --offline             84 passed, 0 failed              (sdk-test.log, regenerated)
+cargo clippy --all-targets --offline -- -D warnings   exit 0, 0 warnings (sdk-clippy.log)
+cargo fmt --check                clean                            (sdk-fmt.log)
+rm -f Cargo.lock && cargo horizon-mod build           exit 0       (festive-build-1.log)
+rm -f Cargo.lock && cargo horizon-mod build (again)   byte-identical (cmp) (festive-build-2.log)
+cargo horizon-mod check createaddition.hmod           exit 0       (festive-check.log)
+fits --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a  "0a875da  made for" (festive-fits-pin.log)
+fits --build 0b14f8acfd97fa2c750e42795249dcc981178ca4  "does not fit: 1 item changed
+                                                       the method `BlockStates::light_emission` (removed)"
+                                                                    (festive-fits-other.log)
+python3 tools/data_shape.py createaddition.hmod   6/6 26.3 loot tables
+python3 tools/carry_content.py --check    assets/ and data/ match the jar carry
+python3 tools/check_licence.py    upstream notice verbatim       (licence-notice.log)
+python3 ports/tools/verify-sdk-package.py createaddition   1/1     (verify-sdk-package.log)
+```
+
+Deliverable: `createaddition.hmod`, **186,895 B**, SHA-256
+`715ce0ea799f9ad7c16d8bbc33df8b6c3fcafa2057ddf03bf60b84620a5025a4`, **125 entries**, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too); 114 `assets/`+`data/` files (was 106).
+
+```
+createaddition 0.2.8 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  186895 bytes, SHA-256 715ce0ea799f9ad7c16d8bbc33df8b6c3fcafa2057ddf03bf60b84620a5025a4, unsigned
+```
+
+```
+Create Crafts & Additions:
+0a875da  made for
+Create Crafts & Additions:
+0b14f8a  does not fit: 1 item changed
+    the method `BlockStates::light_emission` (removed)
+```
+
+**The second `fits` run is red and that is the measured finding**: the lamp's `light_emission`
+surface (0.2.5) does not exist at `0b14f8a`. This slice adds no new API surface — `Laying`,
+`Pending` and the carried items use only what the pin has.
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-festive-default.log` | `PASS` + `EXIT:0` | A–L unchanged in this run (the relay carried 25,020 FE conserved, the lamp 1 FE/t over 43 ticks, the comparator 0/8/15, the generator exactly 1,000 FE/t over 28 ticks), plus **M**: the festive spool (the **item**, two `ctl interact` clicks) lays a wire both ends save as `festive`, exactly one festive spool becomes exactly one empty spool, the wire carries **exactly 1,000 FE/t** (29,000 over 29 ticks; 20,000 in the 20-tick window), festive is refused between two large connectors while **gold is accepted on the same pair**, `createaddition:iron_wire` is held while `link … iron` is refused, and the empty spool hands back exactly one festive spool (0 → 1) |
+| `e2e-festive-selftest.log` | `FAIL` + `EXIT:1` | `FAIL: FESTIVE_SELFTEST: festive was refused between two large connectors (Two large connectors need a gold or electrum wire.), so the refusal assertion is alive` |
+| `e2e-festive-suite-selftest.log` | `FAIL` + `EXIT:1` | the suite's conservation counterfactual (`SELFTEST: the conservation assertion did not trip`) |
+| `e2e-festive-control.log` | `FAIL` + `EXIT:1` | the package-less game has no accumulator item (`the accumulator item did not register: …`); the default run's control leg also refuses `createaddition:festive_spool` and `createaddition:iron_wire` by id |
+| `probe-festive.log` | `PASS` + `EXIT:0` | the probe that found this port's pending-selection defect (one spool became three copies, no wire laid) and then pinned the click geometry (`FESTIVE_ONLY=1`) |
+
+`python3 ports/tools/check-e2e-logs.py createaddition-e2e --strict`:
+**logs=30 ok=30 missing-exit=0 bad-exit=0** (the 29 earlier legs still green).
 
 ## 0.2.7 — the creative generator
 

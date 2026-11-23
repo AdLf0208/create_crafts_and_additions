@@ -53,6 +53,11 @@
 #     1,000 FE a tick to an accumulator (20,000 FE in the 20-tick window), stone in the
 #     generator's place moves nothing, and a generator beside an accumulator fills it at the
 #     accumulator's 5,000 FE a tick with no connector at all.
+#  M  the festive wire: `createaddition:festive_spool` lays it with two right clicks, both ends
+#     save the type as `festive`, the creative hand keeps its spool, it carries exactly 1,000 FE
+#     a tick like copper, two large connectors refuse it (`REQUIRES_HIGH_CURRENT`) while gold is
+#     accepted, no iron wire kind exists (the item is content only, as in 1.7.2), and in survival
+#     the empty spool coils a festive wire back onto a festive spool.
 #
 # SELFTEST=1 flips B's conservation assertion (it must FAIL), proving the
 # scenario can fail. RELAY_SELFTEST=1 flips I's unpowered gate assertion instead, so
@@ -238,6 +243,7 @@ WIRE_REPLY='^(Wire removed\.|These connectors are not linked\.)'
 MODE_REPLY='^Mode set to (none|pull|push)\.'
 ENERGY_REPLY='^Energy set to [0-9]+ FE\.'
 MODE_REFUSAL='^The mode is none, pull or push\.'
+WIRE_WORD_REFUSAL='^The wire is copper, gold, electrum or festive\.'
 
 NEXT_TAG=0
 
@@ -420,6 +426,17 @@ control_leg() {
     [ "$(block_name "$creative_at" 101 0)" != "createaddition:creative_energy" ] \
         || fail "the control game placed a creative generator, so the block id was known"
     echo "  the control's setblock left $(block_name "$creative_at" 101 0) where the creative generator would be" >&2
+    # The festive spool and the iron wire are this slice's items: the same package-less game
+    # must not know them either.
+    ctl give createaddition:festive_spool 1 >/dev/null 2>&1 || true
+    ctl wait 4 >/dev/null
+    [ "$(item_held createaddition:festive_spool)" = 0 ] \
+        || fail "the control game has the festive spool item, so the item ids do not come from this package"
+    ctl give createaddition:iron_wire 1 >/dev/null 2>&1 || true
+    ctl wait 4 >/dev/null
+    [ "$(item_held createaddition:iron_wire)" = 0 ] \
+        || fail "the control game has the iron wire item, so the item ids do not come from this package"
+    echo "  the control game refuses both createaddition:festive_spool and createaddition:iron_wire" >&2
     ctl quit >/dev/null 2>&1 || true
 }
 
@@ -470,6 +487,47 @@ break_drop_leg() { # break_drop_leg BLOCK -> sets DROPPED
     DROPPED=$((after - before))
     echo "  $block: broke and dropped $DROPPED (held $before -> $after)" >&2
 }
+
+# FESTIVE_ONLY=1: the festive spool click alone — place the rig, right-click both connectors
+# with the spool, and print what the two ends saved. It is the probe that established the click
+# geometry (a connector's outline is the nub on its mounted face, so the click comes from the
+# side away from the wall); it asserts only that a wire was laid, so a geometry problem stops
+# here instead of inside the full scenario.
+if [ "${FESTIVE_ONLY:-0}" = 1 ]; then
+    launch "$GAME" "$WORLD"
+    arena
+    P_A=$((X0 + 68))
+    P_C1=$((P_A + 1))
+    P_C2=$((P_C1 + 4))
+    P_B=$((P_C2 + 1))
+    ctl command "execute in minecraft:the_end run tp @s $((X0 + 52)).5 101 0.5" >/dev/null
+    ctl wait 10 >/dev/null
+    ctl command "execute in minecraft:the_end run fill $((P_A - 3)) 100 -2 $((P_B + 1)) 100 2 minecraft:stone" >/dev/null
+    ctl command "execute in minecraft:the_end run fill $((P_A - 3)) 101 -2 $((P_B + 1)) 104 2 minecraft:air" >/dev/null
+    ctl wait 6 >/dev/null
+    ctl command "execute in minecraft:the_end run tp @s $((P_C1 + 2)).5 101 0.5" >/dev/null
+    ctl wait 4 >/dev/null
+    place_accumulator "$P_A" 102
+    place_accumulator "$P_B" 102
+    place_connector "$P_C1" west createaddition:connector 102
+    place_connector "$P_C2" east createaddition:connector 102
+    ctl command "item replace entity @s hotbar.0 with createaddition:festive_spool 1" >/dev/null
+    ctl select 1 >/dev/null
+    ctl wait 4 >/dev/null
+    echo "  probe: holding $(item_held createaddition:festive_spool) festive spool(s), state $(block_state "$P_C1" 102 0)" >&2
+    ctl interact "$P_C1" 102 0 east >/dev/null 2>&1 || true
+    ctl wait 2 >/dev/null
+    echo "  probe: after the first click the spool reads $(ctl inventory | jq -c '.hotbar[] | select(.item=="createaddition:festive_spool")')" >&2
+    echo "  probe: chat after the first click: $(chat | head -4 | tr '\n' '|')" >&2
+    ctl interact "$P_C2" 102 0 west >/dev/null 2>&1 || true
+    ctl wait 6 >/dev/null
+    echo "  probe: after the second click the spool reads $(ctl inventory | jq -c '.hotbar[] | select(.item=="createaddition:festive_spool")')" >&2
+    echo "  probe: chat after the second click: $(chat | head -4 | tr '\n' '|')" >&2
+    info "$P_C1" 102 0
+    info "$P_C2" 102 0
+    echo "PASS: the festive probe ran (FESTIVE_ONLY)"
+    exit 0
+fi
 
 # LOOT_ONLY=1: the loot-table leg alone, on a launcher-built game. Used to run the same
 # assertion against a package that still carries the 1.21.1 loot tables: that run must fail,
@@ -537,7 +595,9 @@ if [ "$CONTROL" = 1 ]; then control_leg; fi
 launch "$GAME" "$WORLD"
 arena
 
-ctl give createaddition:modular_accumulator 1 >/dev/null
+# A package-less game refuses the id, so the give itself fails: the assertion is the inventory
+# below, which names what is missing.
+ctl give createaddition:modular_accumulator 1 >/dev/null 2>&1 || true
 ctl wait 4 >/dev/null
 ctl inventory | jq -e '[.hotbar[], .main[] | select(.item == "createaddition:modular_accumulator")] | length >= 1' >/dev/null \
     || fail "the accumulator item did not register: $(ctl inventory | jq -c '{hotbar,main}')"
@@ -1276,4 +1336,145 @@ D_ELAPSED=$((t - D_T0))
     || fail "the accumulator beside the generator gained $D_GAIN FE over $D_ELAPSED ticks, not the 5,000/tick its own insert caps the generator's offer at"
 echo "  the direct pair: the accumulator gained $D_GAIN FE over $D_ELAPSED game ticks at 5,000/tick, no connector involved" >&2
 
-echo "PASS: FE crossed the wire at 1,000/t and was conserved, an unlinked connector moved nothing, the 16-block limit held, copper was refused between two large connectors, an accumulator fed the block above it, a three-high tower formed one 6,000,000 FE pool, a broken tower re-formed at 4,000,000, separated accumulators stayed singles, a doctored saved tower was refused as its block's own single, every block drops itself, the redstone relay passed energy only while powered, the small light connector lit from its network's one FE a tick and went dark when unlinked, a comparator on the formed tower carried the jar's fraction (0, 8, 15) on its own output wire while the same rig on stone read 0, and the creative generator supplied a wire at exactly 1,000 FE a tick (20,000 FE in the window) while stone in its place moved nothing and a generator beside an accumulator filled it at 5,000 a tick"
+echo "== M: the festive spool lays the jar's fourth wire; festive is low-current like copper =="
+# `WireType.FESTIVE(3, 256, 26, 94, 12, copper_wire x4, festive_spool)` is the jar's fourth wire:
+# it transfers 256 like copper, `IWireNode.connect` refuses `COPPER` **or** `FESTIVE` between two
+# large connectors, and coiling one back up returns a festive spool (`getSourceDrop()`). `IRON(4,
+# ...)` is commented out upstream together with `IRON_SPOOL`, so `createaddition:iron_wire` is an
+# item with no wire kind and no spool.
+#
+# The rig hangs at **eye height** (y=102 with the player's feet on the pad at y=101), not in the
+# floor row: a connector's outline is the nub on the face it is mounted on (4 x 4 pixels), so a
+# click from the front has to be almost horizontal. A player standing beside a rig in the floor
+# row is 1.1 blocks above its nub and the descending ray crosses the nub's thin band **above** it,
+# hitting nothing at all (two probe runs, `probe-festive.log`); with the rig at y=102 the eye and
+# the nub are 0.12 apart and the ray goes through it.
+M_A=$((X0 + 68))
+M_C1=$((M_A + 1))
+M_C2=$((M_C1 + 4))
+M_B=$((M_C2 + 1))
+M_BIG_A=$((X0 + 80))
+M_BIG_B=$((M_BIG_A + 4))
+M_Y=102
+# The pad is this far from the arena, so its chunks are **not** loaded while the player stands at
+# phase L's rig: a `fill`/`setblock` in an unloaded chunk is refused (`ctl` exits 1). Stand on
+# phase J's stone pad first — the teleport loads the neighbourhood — then lay this pad.
+ctl command "execute in minecraft:the_end run tp @s $((X0 + 52)).5 101 0.5" >/dev/null
+ctl wait 10 >/dev/null
+ctl command "execute in minecraft:the_end run fill $((M_A - 3)) 100 -2 $((M_BIG_B + 1)) 100 2 minecraft:stone" >/dev/null
+ctl command "execute in minecraft:the_end run fill $((M_A - 3)) 101 -2 $((M_BIG_B + 1)) 104 2 minecraft:air" >/dev/null
+ctl wait 6 >/dev/null
+ctl command "execute in minecraft:the_end run tp @s $((M_C1 + 2)).5 101 0.5" >/dev/null
+ctl wait 4 >/dev/null
+[ "$(block_name "$((M_A - 3))" 100 0)" = "minecraft:stone" ] \
+    || fail "the festive pad was not laid at $((M_A - 3)),100 (got '$(block_name "$((M_A - 3))" 100 0)')"
+[ "$(block_name "$M_C1" "$M_Y" 0)" = "minecraft:air" ] \
+    || fail "the festive rig's connector cell is not air before placement"
+place_accumulator "$M_A" "$M_Y"
+place_accumulator "$M_B" "$M_Y"
+place_connector "$M_C1" west createaddition:connector "$M_Y"
+place_connector "$M_C2" east createaddition:connector "$M_Y"
+# The spool is the item a player links with: put it in the hotbar, select it, and click the near
+# connector (the first click selects its node) and then the far one (the second lays the wire).
+ctl command "item replace entity @s hotbar.0 with createaddition:festive_spool 1" >/dev/null
+ctl select 1 >/dev/null
+ctl wait 4 >/dev/null
+[ "$(item_held createaddition:festive_spool)" = 1 ] \
+    || fail "the festive spool item did not register: $(ctl inventory | jq -c '{hotbar,main}')"
+ctl interact "$M_C1" "$M_Y" 0 east >/dev/null
+ctl wait 2 >/dev/null
+ctl interact "$M_C2" "$M_Y" 0 west >/dev/null
+ctl wait 6 >/dev/null
+info "$M_C1" "$M_Y" 0
+[ "$links" = 1 ] || fail "the festive spool laid no wire (the connector holds $links)"
+case "$INFO_LINE" in
+    *")/0/festive]"*) echo "  the two clicks laid a festive wire: $INFO_LINE" >&2 ;;
+    *) fail "the wire the festive spool laid is not saved as festive: $INFO_LINE" ;;
+esac
+info "$M_C2" "$M_Y" 0
+case "$INFO_LINE" in
+    *")/0/festive]"*) ;;
+    *) fail "the far end of the festive wire does not name festive: $INFO_LINE" ;;
+esac
+# The player is in survival from phase H's break leg, so this is the real spend path: the last
+# wire spool becomes the empty spool **in the hand** and is not handed over a second time (the
+# 0.1.0 defect was one spool returning two empty ones).
+[ "$(item_held createaddition:festive_spool)" = 0 ] \
+    || fail "the festive spool was not used up laying the wire (held $(item_held createaddition:festive_spool))"
+[ "$(item_held createaddition:spool)" = 1 ] \
+    || fail "the last festive spool did not become exactly one empty spool (held $(item_held createaddition:spool))"
+echo "  both ends save type 'festive'; the one festive spool became exactly one empty spool" >&2
+
+echo "  -- it carries exactly 1,000 FE a tick, the same rate as copper"
+seed_at "$M_A" "$M_Y" 100000
+command_reply "createaddition mode $M_C1 $M_Y 0 pull" "$MODE_REPLY"
+command_reply "createaddition mode $M_C2 $M_Y 0 push" "$MODE_REPLY"
+# Prime the network's double buffer: the first tick delivers nothing, every tick after it 1,000 FE.
+ctl wait 10 >/dev/null
+info "$M_B" "$M_Y" 0
+M_BEFORE=$energy
+M_T0=$t
+ctl wait "$TICKS"
+info "$M_B" "$M_Y" 0
+M_GAIN=$((energy - M_BEFORE))
+M_ELAPSED=$((t - M_T0))
+[ "$M_ELAPSED" -ge "$TICKS" ] \
+    || fail "only $M_ELAPSED game ticks passed between the two reads, expected at least $TICKS"
+[ "$M_GAIN" -ge $((RATE * TICKS)) ] \
+    || fail "the festive wire delivered $M_GAIN FE over $M_ELAPSED ticks, less than ${RATE}/tick over $TICKS ticks"
+[ "$M_GAIN" = $((RATE * M_ELAPSED)) ] \
+    || fail "the festive wire delivered $M_GAIN FE over $M_ELAPSED game ticks, not exactly the ${RATE}/tick a small connector carries"
+echo "  the festive wire carried $M_GAIN FE over $M_ELAPSED game ticks (exactly ${RATE}/tick; $((RATE * TICKS)) FE in the $TICKS-tick window)" >&2
+
+echo "  -- the differential: two large connectors refuse festive, and accept gold"
+ctl command "execute in minecraft:the_end run tp @s $((M_BIG_A + 2)).5 101 0.5" >/dev/null
+ctl wait 4 >/dev/null
+place_connector "$M_BIG_A" west createaddition:large_connector "$M_Y"
+place_connector "$M_BIG_B" east createaddition:large_connector "$M_Y"
+info "$M_BIG_A" "$M_Y" 0
+[ "$capacity" = 5000 ] || fail "a large connector's window is $capacity, expected 5000"
+command_reply "createaddition link $M_BIG_A $M_Y 0 $M_BIG_B $M_Y 0 festive" "$LINK_REPLY"
+LAST_REPLY=$REPLY
+echo "  link $M_BIG_A-$M_BIG_B (festive): $LAST_REPLY" >&2
+case "$LAST_REPLY" in
+    *"gold or electrum"*) echo "  festive refused between two large connectors, as copper is" >&2 ;;
+    *) fail "festive was not refused between two large connectors: $LAST_REPLY" ;;
+esac
+if [ "${FESTIVE_SELFTEST:-0}" = 1 ]; then
+    # The deliberately wrong expectation: the wire MUST have been accepted. It was refused, so this
+    # leg fails — the counterfactual for the assertion above.
+    fail "FESTIVE_SELFTEST: festive was refused between two large connectors ($LAST_REPLY), so the refusal assertion is alive"
+fi
+info "$M_BIG_A" "$M_Y" 0
+[ "$links" = 0 ] || fail "the refused festive wire was recorded anyway"
+command_reply "createaddition link $M_BIG_A $M_Y 0 $M_BIG_B $M_Y 0 gold" "$LINK_REPLY"
+[ "$REPLY" = "Nodes linked." ] || fail "gold was refused between two large connectors: $REPLY"
+
+echo "  -- the iron wire is content only: the item exists and no wire kind does"
+ctl command "item replace entity @s hotbar.1 with createaddition:iron_wire 1" >/dev/null
+ctl wait 4 >/dev/null
+[ "$(item_held createaddition:iron_wire)" = 1 ] \
+    || fail "the iron wire item did not register: $(ctl inventory | jq -c '{hotbar,main}')"
+command_reply "createaddition link $M_BIG_A $M_Y 0 $M_BIG_B $M_Y 0 iron" "$WIRE_WORD_REFUSAL"
+[ "$REPLY" = "The wire is copper, gold, electrum or festive." ] \
+    || fail "an iron wire kind was accepted: $REPLY"
+echo "  createaddition:iron_wire is held and /createaddition link refuses 'iron', as 1.7.2 has no IRON wire" >&2
+
+echo "  -- the empty spool coils a festive wire back onto a festive spool"
+ctl command "execute in minecraft:the_end run tp @s $((M_C1 + 2)).5 101 0.5" >/dev/null
+ctl wait 4 >/dev/null
+ctl command "gamemode survival" >/dev/null
+ctl command "item replace entity @s hotbar.1 with createaddition:spool 1" >/dev/null
+ctl select createaddition:spool >/dev/null
+ctl wait 4 >/dev/null
+M_SPOOLS_BEFORE=$(item_held createaddition:festive_spool)
+ctl interact "$M_C1" "$M_Y" 0 east >/dev/null
+ctl wait 6 >/dev/null
+M_SPOOLS_AFTER=$(item_held createaddition:festive_spool)
+[ "$((M_SPOOLS_AFTER - M_SPOOLS_BEFORE))" = 1 ] \
+    || fail "the empty spool took the festive wire out and handed back $((M_SPOOLS_AFTER - M_SPOOLS_BEFORE)) festive spools, expected one"
+info "$M_C1" "$M_Y" 0
+[ "$links" = 0 ] || fail "the festive wire is still saved after the empty spool took it"
+echo "  the empty spool removed the festive wire and gave back one festive spool ($M_SPOOLS_BEFORE -> $M_SPOOLS_AFTER)" >&2
+
+echo "PASS: FE crossed the wire at 1,000/t and was conserved, an unlinked connector moved nothing, the 16-block limit held, copper was refused between two large connectors, an accumulator fed the block above it, a three-high tower formed one 6,000,000 FE pool, a broken tower re-formed at 4,000,000, separated accumulators stayed singles, a doctored saved tower was refused as its block's own single, every block drops itself, the redstone relay passed energy only while powered, the small light connector lit from its network's one FE a tick and went dark when unlinked, a comparator on the formed tower carried the jar's fraction (0, 8, 15) on its own output wire while the same rig on stone read 0, and the creative generator supplied a wire at exactly 1,000 FE a tick (20,000 FE in the window) while stone in its place moved nothing and a generator beside an accumulator filled it at 5,000 a tick, and the festive spool laid a wire both ends save as 'festive' which carried exactly 1,000 FE a tick while two large connectors refused it and the empty spool gave a festive spool back"

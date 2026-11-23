@@ -1,11 +1,11 @@
-# Create Crafts & Additions — Horizon port (slices 1–8: the FE half)
+# Create Crafts & Additions — Horizon port (slices 1–9: the FE half)
 
 A native Horizon port of **Create Crafts & Additions 1.7.2** (`MRH0/createaddition`, **MIT**): the
 electric half of the mod — two connectors, wire links and the modular accumulator, including the
 jar's 3×3×5 accumulator multiblock and its comparator output, the redstone relay that bridges one
 wire network into another while powered, the small light connector whose lamp draws one FE a
-tick and lights while its network pays it, and the creative generator that gives without limit —
-with the jar's own transfer rates.
+tick and lights while its network pays it, the creative generator that gives without limit, and
+the jar's four wire kinds (the festive spool included) — with the jar's own transfer rates.
 
 **LOCAL-ONLY** until the maintainer approves publishing (ARCHITECTURE.md §8). MIT is licence rank 0
 (permissive); the approval is still required.
@@ -26,12 +26,12 @@ carried `assets/` and `data/`. One `createaddition.hmod` installs both — there
 file, no `.horizon-cache` write and no dev-mod list to manage (the retired 0.1.0 `.hnmod` embedded
 the content that way; see `notes.md`).
 
-Six blocks and seven items:
+Six blocks and nine items:
 
 | Kind | Ids |
 |---|---|
 | Blocks | `createaddition:connector`, `createaddition:large_connector`, `createaddition:small_light_connector`, `createaddition:modular_accumulator`, `createaddition:redstone_relay`, `createaddition:creative_energy` |
-| Items | `createaddition:copper_wire`, `gold_wire`, `electrum_wire`, `spool`, `copper_spool`, `gold_spool`, `electrum_spool` |
+| Items | `createaddition:copper_wire`, `gold_wire`, `electrum_wire`, `iron_wire`, `spool`, `copper_spool`, `gold_spool`, `electrum_spool`, `festive_spool` |
 
 Each block drops itself when mined with a pickaxe (its own 26.3 loot table, and the carried
 `minecraft:mineable/pickaxe` tag); the six blocks are also creative-obtainable.
@@ -47,7 +47,11 @@ Each block drops itself when mined with a pickaxe (its own 26.3 loot table, and 
 - A **spool** lays a wire: right-click one connector, then another. The empty spool takes the wires
   out. The rules are the jar's: a small connector's wire reaches 16 blocks and a large one's 32 (the
   shorter of the two bounds the pair), each connector has 4 or 6 nodes, one wire per node, and
-  copper is refused between two large connectors.
+  **copper and the festive wire** are refused between two large connectors (the jar's low-current
+  pair; gold and electrum are the high-current ones). The empty spool coils each wire back onto a
+  spool of its own kind, so a festive link hands back a festive spool. `createaddition:iron_wire`
+  is carried because 1.7.2 registers the item, but upstream comments out its wire kind and its
+  spool, so it lays nothing here either.
 - Every tick after the level's own, each wire network moves FE: a pull connector draws up to
   **1,000 FE/t** (small) or **5,000 FE/t** (large) from its block into the network's buffer, and a
   push connector feeds its block from that buffer. The network buffer is double-buffered like
@@ -95,14 +99,14 @@ reply repeats as ` [#tag]` so a harness can tell answers apart. The readout text
 ## Layout
 
 ```
-horizon-mod.toml               the only manifest and identity: id, version 0.2.7, api 0.2, [native]
+horizon-mod.toml               the only manifest and identity: id, version 0.2.8, api 0.2, [native]
 Cargo.toml                     one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/rustfmt.toml               tab_spaces = 2, the campaign's style (a root one is refused)
 src/lib.rs                     the one impl Hooks: register, level_tick_post, commands
 src/network.rs                 game glue: the block entity Part, the wire links, the pass, commands
-src/runtime.rs                 the pure rules (30 tests), byte-identical to the retired bundle's
-assets/createaddition/         86 carried files: blockstates, models, textures, items, lang
-data/                          20 carried files (incl. the minecraft harvest tag): block and item definitions, loot tables
+src/runtime.rs                 the pure rules (30 tests), byte-identical to the retired bundle's (the fourth wire kind is glue, `network::Laying`)
+assets/createaddition/         92 files: blockstates, models, textures, items, lang
+data/                          22 files (incl. the minecraft harvest tag): block and item definitions, loot tables
 createaddition.hmod            the deliverable: one file, code + content
 tools/
   carry_content.py [--check]   jar -> assets/ and data/, with the patches documented
@@ -123,7 +127,7 @@ and the old `content/`) is evidence at
 
 ```sh
 cd ports/createaddition
-CARGO_INCREMENTAL=0 cargo test --offline                    # 80 tests
+CARGO_INCREMENTAL=0 cargo test --offline                    # 84 tests
 CARGO_INCREMENTAL=0 cargo clippy --all-targets --offline -- -D warnings
 cargo fmt --check                                           # never --all: it formats the SDK
 rm -f Cargo.lock && cargo horizon-mod build                  # -> target/horizon-mod/createaddition.hmod

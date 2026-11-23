@@ -47,13 +47,14 @@ pub(crate) const LIGHT_CONNECTOR: &str = "createaddition:small_light_connector";
 pub(crate) const CREATIVE: &str = "createaddition:creative_energy";
 /// The empty spool: right-clicking a linked connector with it takes the wire out.
 const SPOOL: &str = "createaddition:spool";
-/// The three wire spools, each naming the wire it lays.
+/// The four wire spools, each naming the wire it lays.
 const COPPER_SPOOL: &str = "createaddition:copper_spool";
 const GOLD_SPOOL: &str = "createaddition:gold_spool";
 const ELECTRUM_SPOOL: &str = "createaddition:electrum_spool";
-/// The item component a spool's pending selection is saved in, and the key inside it.
-const PENDING: &str = "minecraft:custom_data";
-const NODE: &str = "createaddition";
+/// The festive spool: the jar's fourth wire (`WireType.FESTIVE`), copper's low-current rule with a
+/// string of lights on the wire. It is a spool and not a wire item, because a festive wire is never
+/// an item upstream (`WireType.FESTIVE` drops copper wires, so only its spool is a stack).
+const FESTIVE_SPOOL: &str = "createaddition:festive_spool";
 /// The block entity's saved charge: the game's own buffer keeps its amount here
 /// (`ModEnergyBuffer`'s doc), so the readout and the retired bundle's saves agree.
 const CHARGE: &str = "energy";
@@ -274,7 +275,7 @@ struct RelayMove {
   out: i32,
 }
 
-/// The registry keys this port resolves once per pass: the five blocks and the four spools.
+/// The registry keys this port resolves once per pass: the six blocks and the four spools.
 #[derive(Clone, Copy)]
 struct Keys {
   small: BlockKey,
@@ -287,6 +288,7 @@ struct Keys {
   copper: ItemKey,
   gold: ItemKey,
   electrum: ItemKey,
+  festive: ItemKey,
 }
 
 impl Keys {
@@ -307,6 +309,7 @@ impl Keys {
       copper: item(COPPER_SPOOL)?,
       gold: item(GOLD_SPOOL)?,
       electrum: item(ELECTRUM_SPOOL)?,
+      festive: item(FESTIVE_SPOOL)?,
     })
   }
 
@@ -329,22 +332,77 @@ impl Keys {
     }
   }
 
-  /// The wire a held spool lays, or `None` for another item.
-  fn wire(self, item: ItemKey) -> Option<Wire> {
-    if item == self.copper {
-      Some(Wire::Copper)
-    } else if item == self.gold {
-      Some(Wire::Gold)
-    } else if item == self.electrum {
-      Some(Wire::Electrum)
-    } else {
-      None
-    }
+  /// The wire a held spool lays, or `None` for another item. The festive spool lays the jar's
+  /// fourth wire; `WireType.of(item)` has the same four-way table.
+  fn wire(self, item: ItemKey) -> Option<Laying> {
+    [
+      (self.copper, Laying::Copper),
+      (self.gold, Laying::Gold),
+      (self.electrum, Laying::Electrum),
+      (self.festive, Laying::Festive),
+    ]
+    .into_iter()
+    .find(|(key, _)| *key == item)
+    .map(|(_, wire)| wire)
   }
 
   /// Whether a held stack is the empty spool.
   fn is_empty_spool(self, item: ItemKey) -> bool {
     item == self.spool
+  }
+}
+
+/// The wire a spool lays, as the jar's `WireType` names them: copper, gold, electrum and festive.
+/// `IRON` is **commented out** upstream, so `createaddition:iron_wire` is an item with no wire kind
+/// and no spool (its `IRON_SPOOL` entry is commented out too).
+///
+/// [`Wire`] is the three-kind table the inherited link rule was written against, and
+/// `src/runtime.rs` stays byte-identical to the retired bundle's, so the jar's fourth kind lives
+/// here and borrows copper's rule in [`Laying::rule`]: upstream's `IWireNode.connect` refuses
+/// `COPPER` **and** `FESTIVE` between two large connectors, and nothing else distinguishes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Laying {
+  /// `createaddition:copper_wire` — a low-current wire.
+  Copper,
+  /// `createaddition:gold_wire` — a high-current wire.
+  Gold,
+  /// `createaddition:electrum_wire` — a high-current wire.
+  Electrum,
+  /// `createaddition:festive_spool` — the jar's festive wire: copper's rule, and a festive spool
+  /// back when it is coiled up (`WireType.FESTIVE.getSourceDrop()`).
+  Festive,
+}
+
+impl Laying {
+  /// The wire kind the link rule knows, from [`Wire`]: festive is copper's (`FESTIVE(3, 256, …)`
+  /// against `COPPER(0, 256, …)`, and `WireType`'s own `connect` test names the two together).
+  fn rule(self) -> Wire {
+    match self {
+      Self::Copper | Self::Festive => Wire::Copper,
+      Self::Gold => Wire::Gold,
+      Self::Electrum => Wire::Electrum,
+    }
+  }
+
+  /// The wire a saved name names, or `None`. The names are the jar's own enum names, lower case.
+  fn of_name(name: &str) -> Option<Self> {
+    match name {
+      "copper" => Some(Self::Copper),
+      "gold" => Some(Self::Gold),
+      "electrum" => Some(Self::Electrum),
+      "festive" => Some(Self::Festive),
+      _ => None,
+    }
+  }
+
+  /// The wire's saved name, as `/createaddition info` prints it (`(x,y,z)/node/festive`).
+  const fn name(self) -> &'static str {
+    match self {
+      Self::Copper => "copper",
+      Self::Gold => "gold",
+      Self::Electrum => "electrum",
+      Self::Festive => "festive",
+    }
   }
 }
 
@@ -384,7 +442,7 @@ fn mode_saved(nbt: &Compound) -> Option<Mode> {
 struct SavedWire {
   pos: Pos,
   node: i32,
-  wire: Wire,
+  wire: Laying,
 }
 
 fn saved_wires(nbt: &Compound) -> Vec<SavedWire> {
@@ -398,7 +456,7 @@ fn saved_wires(nbt: &Compound) -> Vec<SavedWire> {
         return None;
       };
       let pos = [int_at(entry, "x"), int_at(entry, "y"), int_at(entry, "z")];
-      let wire = name_at(entry, "type").and_then(|name| Wire::of_name(&name))?;
+      let wire = name_at(entry, "type").and_then(|name| Laying::of_name(&name))?;
       Some(SavedWire {
         pos,
         node: int_at(entry, "node"),
@@ -650,6 +708,38 @@ fn level_in_place(host: &dyn ServerHost) -> Option<LevelRef> {
 
 // --- the Parts ------------------------------------------------------------
 
+/// A player's first spool click: the block the spool selected and the node it offered.
+///
+/// Upstream keeps this **on the spool stack** (`WireSpool.setContent` writes `x`/`y`/`z`/`node`
+/// into the stack's `custom_data`) and re-writes the held stack in place. The SDK has no in-place
+/// write: [`ItemPlace::edit`] is an extract followed by an insert, and a creative player's extract
+/// hands the stack back without taking it — so the edited copy lands in the next free slot, the
+/// hand keeps the plain spool, and the second click can never see the selection. Found in game at
+/// 0.2.8 (`probe-festive.log`: one spool became three, no wire laid). The selection therefore
+/// lives in the mod, per player: one selection per player (a second spool replaces it), it is not
+/// saved with the world (it is a click in progress), and the wire is still the kind of the stack
+/// that makes the second click, as `WireType.of(heldItem)` has it.
+#[derive(Default)]
+pub(crate) struct Pending {
+  at: HashMap<u128, (Pos, i32)>,
+}
+
+impl Pending {
+  /// The selection `player` made, if any; taking it clears it.
+  fn take(&mut self, player: u128) -> Option<(Pos, i32)> {
+    self.at.remove(&player)
+  }
+
+  /// Record (or clear) `player`'s selection.
+  fn put(&mut self, player: u128, at: Option<(Pos, i32)>) {
+    if let Some(at) = at {
+      self.at.insert(player, at);
+    } else {
+      self.at.remove(&player);
+    }
+  }
+}
+
 /// Positions whose block entity ticked this tick, per level, drained at that level's tick end.
 #[derive(Default)]
 pub(crate) struct Queue {
@@ -705,7 +795,15 @@ impl BlockEntityPart for Ticker {
 }
 
 /// The part both connectors carry: where a placed one is mounted, and what a spool does with it.
-pub(crate) struct ConnectorShape;
+pub(crate) struct ConnectorShape {
+  pending: Arc<Mutex<Pending>>,
+}
+
+impl ConnectorShape {
+  pub(crate) fn new(pending: Arc<Mutex<Pending>>) -> Self {
+    Self { pending }
+  }
+}
 
 #[mod_api::horizon_part]
 impl BlockPart for ConnectorShape {
@@ -728,13 +826,21 @@ impl BlockPart for ConnectorShape {
     host: &mut dyn ServerHost,
     event: &mut UseItemOnEvent<'_>,
   ) -> Option<InteractionResult> {
-    spool_click(host, event)
+    spool_click(host, event, &self.pending)
   }
 }
 
 /// The relay's Part: where a placed one sits, and what a spool does with it. A relay takes
 /// wires exactly as a connector does; only its two ports differ, and the link chooses one.
-pub(crate) struct RelayShape;
+pub(crate) struct RelayShape {
+  pending: Arc<Mutex<Pending>>,
+}
+
+impl RelayShape {
+  pub(crate) fn new(pending: Arc<Mutex<Pending>>) -> Self {
+    Self { pending }
+  }
+}
 #[mod_api::horizon_part]
 impl BlockPart for RelayShape {
   /// A relay clicked on the floor lies flat along the placer's view (as upstream rotates the
@@ -766,14 +872,22 @@ impl BlockPart for RelayShape {
     host: &mut dyn ServerHost,
     event: &mut UseItemOnEvent<'_>,
   ) -> Option<InteractionResult> {
-    spool_click(host, event)
+    spool_click(host, event, &self.pending)
   }
 }
 
 /// The lamp's Part: a connector's placement and spool click, plus the light its `powered` bit
 /// asks for. The block declares `dynamic_light`, so the light engine asks this part at a cell
 /// (`IBlockExtension.getLightEmission`) instead of taking the block's static `light`.
-pub(crate) struct LightShape;
+pub(crate) struct LightShape {
+  pending: Arc<Mutex<Pending>>,
+}
+
+impl LightShape {
+  pub(crate) fn new(pending: Arc<Mutex<Pending>>) -> Self {
+    Self { pending }
+  }
+}
 
 #[mod_api::horizon_part]
 impl BlockPart for LightShape {
@@ -794,7 +908,7 @@ impl BlockPart for LightShape {
     host: &mut dyn ServerHost,
     event: &mut UseItemOnEvent<'_>,
   ) -> Option<InteractionResult> {
-    spool_click(host, event)
+    spool_click(host, event, &self.pending)
   }
 
   /// The lamp glows at full light while its `powered` bit is set (upstream's
@@ -859,12 +973,14 @@ impl BlockPart for AccumulatorShape {
 fn spool_click(
   host: &mut dyn ServerHost,
   event: &mut UseItemOnEvent<'_>,
+  pending: &Mutex<Pending>,
 ) -> Option<InteractionResult> {
   let click = event.click;
   let stack = click.stack?;
   let keys = Keys::resolve(host)?;
   let player = host.players().acting_player()?;
   let level = player.level(host)?;
+  let who = player.uuid();
   let place = ItemPlace::PlayerHand {
     player: click.player,
     hand: click.hand,
@@ -876,18 +992,26 @@ fn spool_click(
   let wire = keys.wire(stack.item())?;
   let target = saved_at(host, level, keys, click.pos)?;
   let target_node = target.kind.wire_node()?;
-  let Some(first) = pending_of(stack) else {
+  // The pending selection is the mod's (see `Pending`), never the stack's: the lock is taken for
+  // one lookup and released before any host call.
+  let first = pending
+    .lock()
+    .expect("the createaddition pending-selection lock is held for one lookup")
+    .take(who);
+  let Some((from, _selected_node)) = first else {
     // The first click: remember the block and the node it offers.
     let Some(node) = free_node(&target.nbt, target_node) else {
       feedback(host, refusal_text(Refusal::NodesFull));
       return Some(InteractionResult::Success);
     };
-    offer(host, &place, Some((click.pos, node)));
+    pending
+      .lock()
+      .expect("the createaddition pending-selection lock is held for one insert")
+      .put(who, Some((click.pos, node)));
     feedback(host, "Wire connector selected.");
     return Some(InteractionResult::Success);
   };
-  let (from, _selected_node) = first;
-  offer(host, &place, None);
+  // A click on the same block clears the selection, as upstream's emptied stack does.
   if from == click.pos {
     return Some(InteractionResult::Success);
   }
@@ -964,15 +1088,6 @@ fn spool_after_link(count: u32, creative: bool) -> SpoolUse {
   }
 }
 
-/// Record the connector a spool's first click selected, or clear it.
-fn offer(host: &mut dyn ServerHost, place: &ItemPlace, at: Option<(Pos, i32)>) {
-  let _ = host.transaction(|host, tx| {
-    Ok::<_, ()>(place.edit(host, tx, |stack| {
-      set_pending(stack, at);
-    }))
-  });
-}
-
 /// Use one wire spool up as [`spool_after_link`] decided, in one transaction.
 fn spend_spool(host: &mut dyn ServerHost, keys: Keys, place: &ItemPlace, use_up: SpoolUse) {
   let Some(empty) = ItemStack::new(keys.spool, 1) else {
@@ -1001,50 +1116,6 @@ fn spend_spool(host: &mut dyn ServerHost, keys: Keys, place: &ItemPlace, use_up:
   });
 }
 
-/// The custom data a stack carries, or an empty compound.
-fn custom_data(stack: &ItemStack) -> Compound {
-  match stack
-    .components()
-    .and_then(|components| components.as_nbt().get(&PENDING.into()))
-  {
-    Some(Tag::Compound(data)) => data.clone(),
-    _ => Compound::new(),
-  }
-}
-
-/// A spool's remembered first click: the connector and its node.
-fn pending_of(stack: &ItemStack) -> Option<(Pos, i32)> {
-  let data = custom_data(stack);
-  let Tag::Compound(entry) = data.get(&NODE.into())? else {
-    return None;
-  };
-  Some((
-    [int_at(entry, "x"), int_at(entry, "y"), int_at(entry, "z")],
-    int_at(entry, "node"),
-  ))
-}
-
-/// Write (or clear) the pending selection inside the stack's custom data.
-fn set_pending(stack: &mut ItemStack, at: Option<(Pos, i32)>) {
-  let mut data = custom_data(stack);
-  match at {
-    Some((pos, node)) => {
-      let mut entry = Compound::new();
-      put_int(&mut entry, "x", pos[0]);
-      put_int(&mut entry, "y", pos[1]);
-      put_int(&mut entry, "z", pos[2]);
-      put_int(&mut entry, "node", node);
-      data.insert(NODE.into(), Tag::Compound(entry));
-    }
-    None => {
-      data.remove(&NODE.into());
-    }
-  }
-  let mut patch = Compound::new();
-  patch.insert(PENDING.into(), Tag::Compound(data));
-  let _ = stack.set_components(patch);
-}
-
 fn refusal_text(refusal: Refusal) -> &'static str {
   match refusal {
     Refusal::Long => "The connectors are too far apart for this wire.",
@@ -1062,7 +1133,7 @@ struct Proposal {
   from: WireNode,
   b: Pos,
   to: WireNode,
-  wire: Wire,
+  wire: Laying,
 }
 
 impl Proposal {
@@ -1113,7 +1184,7 @@ impl Proposal {
         has_free_node: free_to.is_some(),
         linked_to_other: to_wires.iter().any(|saved| saved.pos == self.a),
       },
-      self.wire,
+      self.wire.rule(),
     )
   }
 
@@ -1154,10 +1225,18 @@ impl Proposal {
 }
 
 /// What an empty spool hands back when it takes a connector's wires out: one spool of each
-/// wire's own kind, per wire removed (upstream coils each wire back onto its own spool).
-fn spools_back(wires: &[SavedWire]) -> [(Wire, u32); 3] {
-  let mut counts = [(Wire::Copper, 0), (Wire::Gold, 0), (Wire::Electrum, 0)];
+/// wire's own kind, per wire removed (upstream coils each wire back onto its own spool, so
+/// `WireType.getSourceDrop()` gives the wire's own spool — a festive wire a festive spool).
+fn spools_back(wires: &[SavedWire]) -> [(Laying, u32); 4] {
+  let mut counts = [
+    (Laying::Copper, 0),
+    (Laying::Gold, 0),
+    (Laying::Electrum, 0),
+    (Laying::Festive, 0),
+  ];
   for saved in wires {
+    // The wire's own kind, never the rule it borrows: festive is low-current like copper but
+    // `WireType.FESTIVE.getSourceDrop()` is the festive spool, so it must come back as one.
     if let Some(slot) = counts.iter_mut().find(|(wire, _)| *wire == saved.wire) {
       slot.1 += 1;
     }
@@ -1257,9 +1336,10 @@ fn remove_wires(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, pos: Pos
   {
     for (wire, count) in spools_back(&confirmed) {
       let key = match wire {
-        Wire::Copper => keys.copper,
-        Wire::Gold => keys.gold,
-        Wire::Electrum => keys.electrum,
+        Laying::Copper => keys.copper,
+        Laying::Gold => keys.gold,
+        Laying::Electrum => keys.electrum,
+        Laying::Festive => keys.festive,
       };
       if let Some(spools) = ItemStack::new(key, count) {
         let _ = player.give_stack(host, spools);
@@ -2799,7 +2879,7 @@ pub(crate) fn command_link(host: &mut dyn ServerHost, command: &CommandInvocatio
   let Some(a) = command_pos(command) else {
     feedback(
       host,
-      "Usage: /createaddition link <x> <y> <z> <x2> <y2> <z2> <copper|gold|electrum>",
+      "Usage: /createaddition link <x> <y> <z> <x2> <y2> <z2> <copper|gold|electrum|festive>",
     );
     return;
   };
@@ -2809,7 +2889,7 @@ pub(crate) fn command_link(host: &mut dyn ServerHost, command: &CommandInvocatio
   }) else {
     feedback(
       host,
-      "Usage: /createaddition link <x> <y> <z> <x2> <y2> <z2> <copper|gold|electrum>",
+      "Usage: /createaddition link <x> <y> <z> <x2> <y2> <z2> <copper|gold|electrum|festive>",
     );
     return;
   };
@@ -2820,10 +2900,13 @@ pub(crate) fn command_link(host: &mut dyn ServerHost, command: &CommandInvocatio
   let Some(keys) = Keys::resolve(host) else {
     return;
   };
-  let Some(wire) = command_word(command, "wire").and_then(Wire::of_name) else {
+  let Some(wire) = command_word(command, "wire").and_then(Laying::of_name) else {
     feedback(
       host,
-      &reply(tag, "The wire is copper, gold or electrum.".to_owned()),
+      &reply(
+        tag,
+        "The wire is copper, gold, electrum or festive.".to_owned(),
+      ),
     );
     return;
   };
@@ -2868,7 +2951,7 @@ fn link_blocks(
   keys: Keys,
   a: Pos,
   b: Pos,
-  wire: Wire,
+  wire: Laying,
 ) -> String {
   let Some(first) = saved_at(host, level, keys, a) else {
     return "No connector at the first position.".to_owned();
@@ -3221,7 +3304,7 @@ mod tests {
     SavedWire {
       pos,
       node: 0,
-      wire: Wire::Copper,
+      wire: Laying::Copper,
     }
   }
 
@@ -3329,6 +3412,34 @@ mod tests {
   }
 
   #[test]
+  fn a_players_first_spool_click_is_the_mods_and_not_the_stacks() {
+    // `ItemPlace::edit` is an extract + insert, and a creative player's extract hands the stack
+    // back without taking it, so the edited copy lands elsewhere and the hand keeps the plain
+    // spool: the selection cannot live on the stack (found in game, `probe-festive.log`).
+    let mut pending = Pending::default();
+    assert_eq!(pending.take(7), None, "no selection before the first click");
+    pending.put(7, Some(([1, 64, 2], 3)));
+    assert_eq!(pending.take(7), Some(([1, 64, 2], 3)));
+    assert_eq!(
+      pending.take(7),
+      None,
+      "the lookup that lays the wire consumes the selection"
+    );
+    // A second spool replaces the first selection: the pending is the player's, not the stack's.
+    pending.put(7, Some(([1, 64, 2], 0)));
+    pending.put(7, Some(([4, 64, 2], 1)));
+    assert_eq!(pending.take(7), Some(([4, 64, 2], 1)));
+    // Another player's selection is their own.
+    pending.put(9, Some(([2, 64, 2], 0)));
+    assert_eq!(pending.take(7), None);
+    assert_eq!(pending.take(9), Some(([2, 64, 2], 0)));
+    // A click on the same block clears it (upstream empties the stack's data).
+    pending.put(7, Some(([1, 64, 2], 0)));
+    pending.put(7, None);
+    assert_eq!(pending.take(7), None);
+  }
+
+  #[test]
   fn a_creative_spool_lays_wire_without_using_any() {
     assert_eq!(
       spool_after_link(1, true),
@@ -3382,7 +3493,7 @@ mod tests {
     SavedWire {
       pos,
       node,
-      wire: Wire::Copper,
+      wire: Laying::Copper,
     }
   }
 
@@ -3721,25 +3832,132 @@ mod tests {
     let a = SavedWire {
       pos: [1, 0, 0],
       node: 0,
-      wire: Wire::Copper,
+      wire: Laying::Copper,
     };
     let b = SavedWire {
       pos: [2, 0, 0],
       node: 1,
-      wire: Wire::Gold,
+      wire: Laying::Gold,
     };
     let c = SavedWire {
       pos: [3, 0, 0],
       node: 2,
-      wire: Wire::Copper,
+      wire: Laying::Copper,
+    };
+    let f = SavedWire {
+      pos: [4, 0, 0],
+      node: 3,
+      wire: Laying::Festive,
     };
     assert_eq!(
-      spools_back(&[a.clone(), b, c]),
-      [(Wire::Copper, 2), (Wire::Gold, 1), (Wire::Electrum, 0)]
+      spools_back(&[a.clone(), b, c, f]),
+      [
+        (Laying::Copper, 2),
+        (Laying::Gold, 1),
+        (Laying::Electrum, 0),
+        (Laying::Festive, 1),
+      ],
+      "a festive wire coils back onto a festive spool, not onto a copper one \
+       (WireType.FESTIVE.getSourceDrop() is the festive spool)"
     );
     assert_eq!(
       spools_back(&[]),
-      [(Wire::Copper, 0), (Wire::Gold, 0), (Wire::Electrum, 0)]
+      [
+        (Laying::Copper, 0),
+        (Laying::Gold, 0),
+        (Laying::Electrum, 0),
+        (Laying::Festive, 0),
+      ]
+    );
+  }
+
+  // --- the festive wire -----------------------------------------------------
+
+  #[test]
+  fn the_festive_spool_lays_the_jars_fourth_wire() {
+    // `WireType`: COPPER(0, 256), GOLD(1, 1024), ELECTRUM(2, 8196), FESTIVE(3, 256); `IRON(4,
+    // 256, …)` is commented out with its `IRON_SPOOL`, so the iron wire item exists and no wire
+    // kind does.
+    assert_eq!(FESTIVE_SPOOL, "createaddition:festive_spool");
+    for (name, wire) in [
+      ("copper", Laying::Copper),
+      ("gold", Laying::Gold),
+      ("electrum", Laying::Electrum),
+      ("festive", Laying::Festive),
+    ] {
+      assert_eq!(Laying::of_name(name), Some(wire));
+      assert_eq!(wire.name(), name);
+    }
+    assert_eq!(
+      Laying::of_name("iron"),
+      None,
+      "upstream's IRON wire type is commented out, so `link … iron` names no wire"
+    );
+    assert_eq!(
+      Laying::of_name("Festive"),
+      None,
+      "the saved names are the jar's enum names, lower case"
+    );
+    assert_eq!(
+      Laying::Festive.rule(),
+      Wire::Copper,
+      "festive carries copper's rule: 256 like COPPER, and `connect` tests them together"
+    );
+  }
+
+  #[test]
+  fn a_festive_wire_is_refused_between_two_large_connectors_but_gold_is_not() {
+    // `IWireNode.connect`: `if(type == WireType.COPPER || type == WireType.FESTIVE) return
+    // REQUIRES_HIGH_CURRENT;` — and only between two `ConnectorType.Large` ends.
+    let large = |pos| End {
+      pos,
+      connector: Connector::Large,
+      has_free_node: true,
+      linked_to_other: false,
+    };
+    let (a, b) = (large([0, 64, 0]), large([4, 64, 0]));
+    assert_eq!(
+      plan_link(a, b, Laying::Copper.rule()),
+      Link::Refused(Refusal::RequiresHighCurrent)
+    );
+    assert_eq!(
+      plan_link(a, b, Laying::Festive.rule()),
+      Link::Refused(Refusal::RequiresHighCurrent),
+      "festive is refused between two large connectors exactly as copper is"
+    );
+    assert_eq!(plan_link(a, b, Laying::Gold.rule()), Link::Linked);
+    assert_eq!(plan_link(a, b, Laying::Electrum.rule()), Link::Linked);
+    // Festive is accepted by a small end, as copper is.
+    let small = End {
+      pos: [4, 64, 0],
+      connector: Connector::Small,
+      has_free_node: true,
+      linked_to_other: false,
+    };
+    assert_eq!(
+      plan_link(large([0, 64, 0]), small, Laying::Festive.rule()),
+      Link::Linked
+    );
+  }
+
+  #[test]
+  fn a_festive_wire_is_saved_and_read_back_under_its_own_name() {
+    let festive = SavedWire {
+      pos: [5, 64, 2],
+      node: 3,
+      wire: Laying::Festive,
+    };
+    let mut nbt = Compound::new();
+    store_wires(&mut nbt, std::slice::from_ref(&festive));
+    assert_eq!(
+      saved_wires(&nbt),
+      vec![festive],
+      "a saved festive link reads back as festive"
+    );
+    assert_eq!(
+      links_text(&saved_wires(&nbt)),
+      "(5,64,2)/3/festive",
+      "the readout names the wire it holds"
     );
   }
 

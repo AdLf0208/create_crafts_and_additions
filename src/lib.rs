@@ -23,7 +23,7 @@ use mod_api::{
 };
 
 use crate::network::{
-  AccumulatorShape, ConnectorShape, Kind, LightShape, Queue, RelayShape, Signals, Ticker,
+  AccumulatorShape, ConnectorShape, Kind, LightShape, Pending, Queue, RelayShape, Signals, Ticker,
 };
 
 /// The mod's session state: which of its block entities ticked this tick, per level, and the
@@ -32,6 +32,7 @@ use crate::network::{
 struct Mod {
   queue: Arc<Mutex<Queue>>,
   signals: Arc<Mutex<Signals>>,
+  pending: Arc<Mutex<Pending>>,
 }
 
 #[mod_api::horizon_mod]
@@ -63,12 +64,15 @@ impl Hooks for Mod {
       "the energy part attaches once: {attached:?}"
     );
 
-    registrar.block_part(small, ConnectorShape);
-    registrar.block_part(large, ConnectorShape);
-    registrar.block_part(relay, RelayShape);
+    // Every wire block's Part shares one pending-selection store: the first spool click selects a
+    // node, the second lays the wire, and a spool's selection is the player's (`network::Pending`),
+    // not the stack's — the SDK cannot rewrite a held stack in place.
+    registrar.block_part(small, ConnectorShape::new(Arc::clone(&self.pending)));
+    registrar.block_part(large, ConnectorShape::new(Arc::clone(&self.pending)));
+    registrar.block_part(relay, RelayShape::new(Arc::clone(&self.pending)));
     // The lamp is a connector with its own Part: the same placement and spool click, plus the
     // `light_emission` answer its `dynamic_light` declaration asks for.
-    registrar.block_part(light, LightShape);
+    registrar.block_part(light, LightShape::new(Arc::clone(&self.pending)));
     // The accumulator answers a comparator: `has_analog_output` says it may be asked and
     // `analog_output` gives the tower's fill, which the level pass computes and records.
     registrar.block_part(

@@ -1,7 +1,7 @@
 id = "createaddition"
 name = "Create Crafts & Additions"
-version = "0.2.7"
-description = """Create's electric bridge, FE half: the two connectors with their spools and wire links, the wire network that moves energy between them, the modular accumulator with its 3x3x5 multiblock tower and its comparator output, the redstone relay that bridges one wire network into another while powered, the small light connector whose lamp draws one FE a tick and lights while its network pays it, and the creative generator that gives without limit and fills every neighbour each tick. Partial port: Create's kinetic network, the rotation half (motor, alternator, rolling mill, tesla coil) and the client half are not carried."""
+version = "0.2.8"
+description = """Create's electric bridge, FE half: the two connectors with their spools and wire links (copper, gold, electrum and the festive wire, with the iron wire as the jar's own unwired item), the wire network that moves energy between them, the modular accumulator with its 3x3x5 multiblock tower and its comparator output, the redstone relay that bridges one wire network into another while powered, the small light connector whose lamp draws one FE a tick and lights while its network pays it, and the creative generator that gives without limit and fills every neighbour each tick. Partial port: Create's kinetic network, the rotation half (motor, alternator, rolling mill, tesla coil) and the client half are not carried."""
 authors = ["MRH0 (upstream)", "Horizon native mod contributors"]
 # The SDK package (mod API 0.2): one flat .hmod carrying the code in src/ and the
 # connectors', accumulator's and relay's blockstates, models, textures, items, loot tables and lang in

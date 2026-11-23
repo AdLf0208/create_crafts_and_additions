@@ -87,11 +87,19 @@ does not try. The `create:` items its recipes need are likewise absent.
 - `WireType` (copper/gold/electrum/festive) carries a `transfer` value
   (256/1024/8196) that **nothing in 1.7.2 reads**: the throughput limit is the
   connector's, not the wire's. Recorded, not enforced.
+- `WireType`'s four live constants are `COPPER(0, 256)` / `GOLD(1, 1024)` / `ELECTRUM(2, 8196)` /
+  `FESTIVE(3, 256)`; `IRON(4, …)` is **commented out**, and so is `CAItems.IRON_SPOOL`, while
+  `IRON_WIRE` stays registered — the iron wire is an item with no wire kind and no spool.
+  The low/high-current split is not a field: `IWireNode.connect` refuses `COPPER` **or** `FESTIVE`
+  only between two `ConnectorType.Large` ends (`REQUIRES_HIGH_CURRENT`). Festive's
+  `getSourceDrop()` is the festive spool (what the empty spool hands back) and its `getDrop()` is
+  `copper_wire x4`. The festive wire is drawn with a string of coloured lights by
+  `WireNodeRenderer` (`isFestive()`), a renderer this port does not carry.
 - **Wires are linked with a spool item** (`item/WireSpool.java`): the first
-  right click stores `{x,y,z,node}` in the stack's custom data, the second
-  connects, consumes one spool and gives the empty spool back; the empty spool
-  removes a link. Node choice comes from the click location
-  (`getAvailableNode(clickLocation)`).
+  right click stores `{x,y,z,node}` in the stack's custom data (`setContent`, written with
+  `getItemInHand().set(CUSTOM_DATA, …)` — an **in-place** stack write), the second connects, consumes
+  one spool and gives the empty spool back; the empty spool removes a link. Node choice comes from the
+  click location (`getAvailableNode(clickLocation)`).
 - **Energy network** (`energy/network/EnergyNetwork.java`): one buffer per
   wire graph, **double-buffered** — `tick()` swaps `inBuff` and `outBuff`, so
   energy pushed in one tick can only be pulled in the next (a 1-tick latency);

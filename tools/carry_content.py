@@ -30,7 +30,9 @@ ROOT = Path(__file__).resolve().parents[1]
 JAR = ROOT.parent / "_shared/licence-cache/createaddition-1.7.2.jar"
 NS = "createaddition"
 
-# The slice's six blocks and seven items (FINDINGS.md, "Jar inventory").
+# The slice's six blocks and nine items (FINDINGS.md, "Jar inventory"). `festive_spool` is the
+# jar's fourth wire kind; `iron_wire` is an item with **no** wire kind (`WireType.IRON` and
+# `IRON_SPOOL` are commented out upstream), so it is content only, as in 1.7.2.
 BLOCKS = [
     "connector",
     "large_connector",
@@ -43,10 +45,12 @@ ITEMS = [
     "copper_wire",
     "gold_wire",
     "electrum_wire",
+    "iron_wire",
     "spool",
     "copper_spool",
     "gold_spool",
     "electrum_spool",
+    "festive_spool",
 ]
 
 # Models the jar ships that this slice draws.
@@ -194,10 +198,12 @@ LANG_KEYS = [
     "item.createaddition.copper_wire",
     "item.createaddition.gold_wire",
     "item.createaddition.electrum_wire",
+    "item.createaddition.iron_wire",
     "item.createaddition.spool",
     "item.createaddition.copper_spool",
     "item.createaddition.gold_spool",
     "item.createaddition.electrum_spool",
+    "item.createaddition.festive_spool",
     "item.createaddition.spool.nbt",
     "createaddition.tooltip.connector.info",
     "createaddition.tooltip.accumulator.info",

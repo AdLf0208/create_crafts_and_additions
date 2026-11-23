@@ -48,6 +48,11 @@
 #     jar's `fractionToRedstoneLevel` midpoint) and 15 (full); the same rig behind a stone
 #     block reads 0, and emptying the tower with `/createaddition energy` takes the wire
 #     back to 0.
+#  L  the creative generator: an unlimited source whose capability gives what is asked and
+#     takes nothing; a connector mounted on it settles `pull` and a wire carries exactly
+#     1,000 FE a tick to an accumulator (20,000 FE in the 20-tick window), stone in the
+#     generator's place moves nothing, and a generator beside an accumulator fills it at the
+#     accumulator's 5,000 FE a tick with no connector at all.
 #
 # SELFTEST=1 flips B's conservation assertion (it must FAIL), proving the
 # scenario can fail. RELAY_SELFTEST=1 flips I's unpowered gate assertion instead, so
@@ -55,7 +60,9 @@
 # unlinked-lamp assertion (the lamp must not draw a single FE), so the lamp's
 # differential is a run of its own too. COMPARATOR_SELFTEST=1 flips K's emptied-tower
 # assertion (the wire must have stayed where it was), so the comparator's own
-# counterfactual is a run as well. CMP_ONLY=1 runs just the comparator rig and prints both
+# counterfactual is a run as well. CREATIVE_SELFTEST=1 flips L's gain assertion (the generator
+# must have supplied nothing), so the creative generator's own counterfactual is a run too.
+# CMP_ONLY=1 runs just the comparator rig and prints both
 # comparator orientations with the wire each drives (the probe that pinned the geometry).
 #
 # The 0.1.0 runs of this scenario (PASS/EXIT:0 default, PASS/EXIT:0 with the
@@ -267,7 +274,7 @@ command_reply() { # command_reply COMMAND REPLY_PATTERN
 info() { # info X Y Z
     # The reply names the position, so a line about another block can never be
     # mistaken for this one.
-    command_reply "createaddition info $1 $2 $3" "^(Connector|Large Connector|Small Light Connector|Modular Accumulator|Redstone Relay) at $1,$2,$3:"
+    command_reply "createaddition info $1 $2 $3" "^(Connector|Large Connector|Small Light Connector|Modular Accumulator|Redstone Relay|Creative Generator) at $1,$2,$3:"
     INFO_LINE=$REPLY
     eval "$(python3 "$PORT/tools/parse_info.py" "$INFO_LINE")"
     [ "${ok:-0}" = 1 ] || fail "the info line did not parse: $INFO_LINE"
@@ -319,6 +326,16 @@ place_accumulator() { # place_accumulator X [Y]
     ctl wait 6 >/dev/null
     [ "$(block_name "$1" "$y" 0)" = "createaddition:modular_accumulator" ] \
         || fail "the accumulator did not place at $1,$y"
+}
+
+# A block at (X, Y, 0) from its setblock argument, asserted by its name: used for the blocks
+# that are not one of the two above (the creative generator).
+place_block() { # place_block X Y ARG NAME
+    local x=$1 y=$2 arg=$3 name=$4
+    ctl command "execute in minecraft:the_end run setblock $x $y 0 $arg" >/dev/null
+    ctl wait 6 >/dev/null
+    [ "$(block_name "$x" "$y" 0)" = "$name" ] \
+        || fail "the $name did not place at $x,$y (got '$(block_name "$x" "$y" 0)')"
 }
 
 # `/createaddition energy X Y Z AMOUNT`.
@@ -396,6 +413,13 @@ control_leg() {
     [ "$(block_name "$lamp_at" 101 0)" != "createaddition:small_light_connector" ] \
         || fail "the control game placed a small light connector, so the block id was known"
     echo "  the control's setblock left $(block_name "$lamp_at" 101 0) where the lamp would be" >&2
+    # The creative generator is this slice's new id: the same package-less game must not know it.
+    local creative_at=$((X0 + 55))
+    ctl command "execute in minecraft:the_end run setblock $creative_at 101 0 createaddition:creative_energy" >/dev/null 2>&1 || true
+    ctl wait 4 >/dev/null
+    [ "$(block_name "$creative_at" 101 0)" != "createaddition:creative_energy" ] \
+        || fail "the control game placed a creative generator, so the block id was known"
+    echo "  the control's setblock left $(block_name "$creative_at" 101 0) where the creative generator would be" >&2
     ctl quit >/dev/null 2>&1 || true
 }
 
@@ -453,7 +477,7 @@ break_drop_leg() { # break_drop_leg BLOCK -> sets DROPPED
 if [ "${LOOT_ONLY:-0}" = 1 ]; then
     launch "$GAME" "$WORLD"
     arena
-    for LOOT_BLOCK in createaddition:connector createaddition:large_connector createaddition:small_light_connector createaddition:modular_accumulator createaddition:redstone_relay; do
+    for LOOT_BLOCK in createaddition:connector createaddition:large_connector createaddition:small_light_connector createaddition:modular_accumulator createaddition:redstone_relay createaddition:creative_energy; do
         break_drop_leg "$LOOT_BLOCK"
         [ "$DROPPED" = 1 ] \
             || fail "mining $LOOT_BLOCK dropped $DROPPED of itself, expected the one its 26.3 loot table names"
@@ -833,13 +857,13 @@ echo "== H: every block's loot table drops the block itself (the 26.3 dialect) =
 # `"condition"`; 26.3's own tables (the prepared resources) write one `"condition":
 # {"type": ...}` per pool and have no `bonus_rolls`. Carried verbatim, the 1.21.1 shape made a
 # block drop nothing (`modularrouters` measured 0 while a vanilla table beside it dropped 1).
-for LOOT_BLOCK in createaddition:connector createaddition:large_connector createaddition:small_light_connector createaddition:modular_accumulator createaddition:redstone_relay; do
+for LOOT_BLOCK in createaddition:connector createaddition:large_connector createaddition:small_light_connector createaddition:modular_accumulator createaddition:redstone_relay createaddition:creative_energy; do
     break_drop_leg "$LOOT_BLOCK"
     [ "$DROPPED" = 1 ] \
         || fail "mining $LOOT_BLOCK dropped $DROPPED of itself, expected the one its 26.3 loot table names"
     ctl command "execute at @s run setblock ~2 ~ ~ minecraft:air" >/dev/null
 done
-echo "  all three blocks drop one of themselves through their 26.3 loot tables" >&2
+echo "  all six blocks drop one of themselves through their 26.3 loot tables" >&2
 
 echo "== I: the redstone relay gates a wire between two accumulators =="
 # The jar's relay (`RedstoneRelayBlockEntity`, `WireGraph.tickBridges`): eight wire nodes in
@@ -1157,4 +1181,99 @@ if [ "${COMPARATOR_SELFTEST:-0}" = 1 ]; then
         || fail "COMPARATOR_SELFTEST: emptying the tower moved the wire from power=$CMP_FULL to power=$CMP_EMPTY, so the assertion is alive"
 fi
 
-echo "PASS: FE crossed the wire at 1,000/t and was conserved, an unlinked connector moved nothing, the 16-block limit held, copper was refused between two large connectors, an accumulator fed the block above it, a three-high tower formed one 6,000,000 FE pool, a broken tower re-formed at 4,000,000, separated accumulators stayed singles, a doctored saved tower was refused as its block's own single, every block drops itself, the redstone relay passed energy only while powered, the small light connector lit from its network's one FE a tick and went dark when unlinked, and a comparator on the formed tower carried the jar's fraction (0, 8, 15) on its own output wire while the same rig on stone read 0"
+echo "== L: the creative generator gives without limit; a wire carries 1,000 FE a tick =="
+# Upstream's `CreativeEnergyStorage` answers `Integer.MAX_VALUE` stored and capacity, gives
+# whatever is asked and takes nothing (`canExtract` true, `canReceive` false), and
+# `CreativeEnergyBlockEntity.tick` offers every neighbouring storage
+# `receiveEnergy(Integer.MAX_VALUE, false)` each tick. A connector mounted on the generator
+# therefore settles `pull`, and the wire carries the connector's 1,000 FE a tick to the sink.
+L_CREATIVE=$((X0 - 30))
+L_C1=$((L_CREATIVE + 1))
+L_C2=$((L_C1 + 4))
+L_ACC=$((L_C2 + 1))
+L_DIRECT_CREATIVE=$((L_CREATIVE - 4))
+L_DIRECT_ACC=$((L_DIRECT_CREATIVE + 1))
+ctl command "execute in minecraft:the_end run fill $((L_DIRECT_CREATIVE - 2)) 100 -2 $((L_ACC + 1)) 100 2 minecraft:stone" >/dev/null
+ctl command "execute in minecraft:the_end run fill $((L_DIRECT_CREATIVE - 2)) 101 -2 $((L_ACC + 1)) 104 2 minecraft:air" >/dev/null
+ctl wait 6 >/dev/null
+ctl command "execute in minecraft:the_end run tp @s $((L_C1 + 2)).5 101 0.5" >/dev/null
+ctl wait 4 >/dev/null
+place_block "$L_CREATIVE" 100 createaddition:creative_energy createaddition:creative_energy
+place_connector "$L_C1" west
+place_accumulator "$L_ACC"
+place_connector "$L_C2" east
+info "$L_C1" 100 0
+[ "$kind" = connector ] || fail "the generator's connector has no block entity (info says $kind)"
+[ "$mode" = pull ] \
+    || fail "a connector beside the creative generator took mode '$mode', expected pull: the generator gives and cannot take"
+case "$(block_state "$L_C1" 100 0)" in
+    *"mode=pull"*) echo "  the connector's own state reads $(block_state "$L_C1" 100 0)" >&2 ;;
+    *) fail "the connector beside the generator shows '$(block_state "$L_C1" 100 0)', expected mode=pull" ;;
+esac
+info "$L_CREATIVE" 100 0
+[ "$kind" = creative ] || fail "the generator's own readout says '$kind', expected the Creative Generator"
+info "$L_ACC" 100 0
+[ "$kind" = accumulator ] || fail "the phase-L sink is a '$kind'"
+[ "$energy" = 0 ] || fail "the sink accumulator starts at $energy FE, expected empty"
+set_mode "$L_C2" push
+link "$L_C1" "$L_C2" gold
+[ "$LAST_REPLY" = "Nodes linked." ] || fail "the generator's wire was not laid: $LAST_REPLY"
+# Prime the pool's double buffer so the one-time window fill is outside the window below: the
+# first tick delivers nothing and every tick after it delivers the connector's 1,000 FE.
+ctl wait 10 >/dev/null
+info "$L_ACC" 100 0
+L_BEFORE=$energy
+L_T0=$t
+ctl wait "$TICKS"
+info "$L_ACC" 100 0
+L_GAIN=$((energy - L_BEFORE))
+L_ELAPSED=$((t - L_T0))
+[ "$L_ELAPSED" -ge "$TICKS" ] \
+    || fail "only $L_ELAPSED game ticks passed between the two reads, expected at least $TICKS"
+[ "$L_GAIN" -ge $((RATE * TICKS)) ] \
+    || fail "the sink gained $L_GAIN FE over $L_ELAPSED ticks, less than the ${RATE}/tick the connector carries in $TICKS ticks"
+[ "$L_GAIN" = $((RATE * L_ELAPSED)) ] \
+    || fail "the sink gained $L_GAIN FE over $L_ELAPSED game ticks, not exactly the ${RATE}/tick a small connector carries"
+if [ "${CREATIVE_SELFTEST:-0}" = 1 ]; then
+    # The deliberately wrong expectation: the generator MUST have moved nothing. It did, so this
+    # leg fails — the counterfactual for the assertion above.
+    [ "$L_GAIN" = 0 ] \
+        || fail "CREATIVE_SELFTEST: the creative generator supplied $L_GAIN FE, so the assertion is alive"
+fi
+echo "  the connector pulls from the generator and the sink gained $L_GAIN FE over $L_ELAPSED game ticks (exactly ${RATE}/tick; $((RATE * TICKS)) FE in the $TICKS-tick window)" >&2
+
+echo "  -- the differential: stone where the generator was, the same wire, moves nothing"
+place_block "$L_CREATIVE" 100 minecraft:stone minecraft:stone
+seed_at "$L_ACC" 100 0
+ctl wait 6 >/dev/null
+info "$L_ACC" 100 0
+L_STONE_BEFORE=$energy
+L_STONE_T0=$t
+ctl wait "$TICKS"
+info "$L_ACC" 100 0
+L_STONE_ELAPSED=$((t - L_STONE_T0))
+[ "$L_STONE_ELAPSED" -ge "$TICKS" ] \
+    || fail "only $L_STONE_ELAPSED ticks passed in the stone window"
+[ "$energy" = "$L_STONE_BEFORE" ] \
+    || fail "the sink moved $L_STONE_BEFORE->$energy FE with stone where the generator was"
+echo "  stone in the generator's place: the sink stayed at $energy FE over $L_STONE_ELAPSED game ticks" >&2
+
+echo "  -- the generator's own tick: an accumulator beside it fills with no connector at all"
+ctl command "execute in minecraft:the_end run tp @s $((L_DIRECT_ACC + 1)).5 101 0.5" >/dev/null
+ctl wait 4 >/dev/null
+place_block "$L_DIRECT_CREATIVE" 100 createaddition:creative_energy createaddition:creative_energy
+place_accumulator "$L_DIRECT_ACC"
+info "$L_DIRECT_ACC" 100 0
+D_BEFORE=$energy
+D_T0=$t
+ctl wait "$TICKS"
+info "$L_DIRECT_ACC" 100 0
+D_GAIN=$((energy - D_BEFORE))
+D_ELAPSED=$((t - D_T0))
+[ "$D_GAIN" -gt 0 ] \
+    || fail "an accumulator beside the generator took nothing: the per-tick push did not run"
+[ "$D_GAIN" = $((5000 * D_ELAPSED)) ] \
+    || fail "the accumulator beside the generator gained $D_GAIN FE over $D_ELAPSED ticks, not the 5,000/tick its own insert caps the generator's offer at"
+echo "  the direct pair: the accumulator gained $D_GAIN FE over $D_ELAPSED game ticks at 5,000/tick, no connector involved" >&2
+
+echo "PASS: FE crossed the wire at 1,000/t and was conserved, an unlinked connector moved nothing, the 16-block limit held, copper was refused between two large connectors, an accumulator fed the block above it, a three-high tower formed one 6,000,000 FE pool, a broken tower re-formed at 4,000,000, separated accumulators stayed singles, a doctored saved tower was refused as its block's own single, every block drops itself, the redstone relay passed energy only while powered, the small light connector lit from its network's one FE a tick and went dark when unlinked, a comparator on the formed tower carried the jar's fraction (0, 8, 15) on its own output wire while the same rig on stone read 0, and the creative generator supplied a wire at exactly 1,000 FE a tick (20,000 FE in the window) while stone in its place moved nothing and a generator beside an accumulator filled it at 5,000 a tick"

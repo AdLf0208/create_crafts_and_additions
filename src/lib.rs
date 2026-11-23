@@ -3,8 +3,9 @@
 //! The FE half only: the two connectors with their spools and wire links, the wire network that
 //! moves energy between them at the end of the level's tick, the modular accumulator that
 //! feeds the blocks on its UP and DOWN faces, the redstone relay that bridges one wire
-//! network into another while its `powered` bit is set, and the small light connector whose
-//! lamp draws 1 FE a tick from its network and lights while it is paid.
+//! network into another while its `powered` bit is set, the small light connector whose
+//! lamp draws 1 FE a tick from its network and lights while it is paid, and the creative
+//! generator that gives without limit and fills every neighbour each tick.
 //!
 //! The rules themselves live in [`runtime`], byte-identical to the retired bundle's `runtime.rs`
 //! and tested by `cargo test` without the game. [`network`] is the glue: the block entity Part,
@@ -43,6 +44,7 @@ impl Hooks for Mod {
     let accumulator = registrar.block_key(network::ACCUMULATOR);
     let relay = registrar.block_key(network::RELAY);
     let light = registrar.block_key(network::LIGHT_CONNECTOR);
+    let creative = registrar.block_key(network::CREATIVE);
 
     let kind = registrar
       .block_entity_type("energy")
@@ -52,6 +54,7 @@ impl Hooks for Mod {
         "modular_accumulator",
         "redstone_relay",
         "small_light_connector",
+        "creative_energy",
       ])
       .build();
     let attached = registrar.block_entity_part(&kind, Ticker::new(Arc::clone(&self.queue)));
@@ -84,6 +87,13 @@ impl Hooks for Mod {
     // (`handlerForCapability`). The connectors keep the declared buffer.
     registrar.block_capability_before_game(&mod_api::ENERGY, &accumulator, |_, at, _, entity| {
       entity.map(|_| network::accumulator_energy(at.level, at.pos))
+    });
+
+    // The creative generator is an unlimited source: its capability answers infinity, gives
+    // whatever is asked and takes nothing (`CreativeEnergyStorage`), registered ahead of any
+    // declaration because there is no amount to keep.
+    registrar.block_capability_before_game(&mod_api::ENERGY, &creative, |_, _, _, entity| {
+      entity.map(|_| network::creative_supply())
     });
   }
 

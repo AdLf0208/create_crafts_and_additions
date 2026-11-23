@@ -6,6 +6,8 @@
 //! lowest-positioned connector, and every move goes through the engine's `ENERGY` capability, so
 //! no energy is created. The rules are [`crate::runtime`]'s, byte-identical to the retired
 //! bundle's `runtime.rs`; this file only reads the world, calls them and writes the result back.
+//! The creative generator is the one block whose energy is *not* a saved charge: its capability
+//! answers infinity, as upstream's `CreativeEnergyStorage` does.
 //!
 //! A block entity is out of the world during its own tick, so its tick only **queues** its
 //! position: the whole pass runs once at `level_tick_post`, over the blocks whose tick ran in
@@ -41,6 +43,8 @@ pub(crate) const RELAY: &str = "createaddition:redstone_relay";
 /// The small light connector: a small connector whose lamp draws 1 FE a tick from its
 /// network and lights while the network pays it.
 pub(crate) const LIGHT_CONNECTOR: &str = "createaddition:small_light_connector";
+/// The creative generator: an unlimited source every tick offers each neighbour a full fill.
+pub(crate) const CREATIVE: &str = "createaddition:creative_energy";
 /// The empty spool: right-clicking a linked connector with it takes the wire out.
 const SPOOL: &str = "createaddition:spool";
 /// The three wire spools, each naming the wire it lays.
@@ -107,6 +111,9 @@ pub(crate) enum Kind {
   /// `createaddition:small_light_connector`: the small connector with a lamp, which draws
   /// 1 FE a tick out of its network and lights while the network pays it.
   Light,
+  /// `createaddition:creative_energy`: an unlimited FE source (`CreativeEnergyStorage`) that
+  /// also offers every neighbour a full fill each tick (`CreativeEnergyBlockEntity.tick`).
+  Creative,
 }
 
 impl Kind {
@@ -115,7 +122,7 @@ impl Kind {
     match self {
       Self::Small | Self::Light => Some(Connector::Small),
       Self::Large => Some(Connector::Large),
-      Self::Accumulator | Self::Relay => None,
+      Self::Accumulator | Self::Relay | Self::Creative => None,
     }
   }
 
@@ -127,6 +134,7 @@ impl Kind {
       Self::Accumulator => "Modular Accumulator",
       Self::Relay => "Redstone Relay",
       Self::Light => "Small Light Connector",
+      Self::Creative => "Creative Generator",
     }
   }
 
@@ -142,6 +150,11 @@ impl Kind {
         connector.max_out(),
       ),
       None if self == Self::Relay => (RELAY_TRANSFER, RELAY_TRANSFER, RELAY_TRANSFER),
+      // The creative generator gives without limit and takes nothing (`CreativeEnergyStorage`:
+      // `canExtract` true, `canReceive` false). Its capability is its own handler, not this
+      // declaration; the numbers here are what a connector mounted on it settles from, and what
+      // the readout names.
+      None if self == Self::Creative => (i32::MAX, 0, i32::MAX),
       None => (
         ACCUMULATOR_CAPACITY,
         ACCUMULATOR_TRANSFER,
@@ -169,7 +182,7 @@ impl Kind {
       Self::Small | Self::Light => Some(WireNode::Connector(Connector::Small)),
       Self::Large => Some(WireNode::Connector(Connector::Large)),
       Self::Relay => Some(WireNode::Relay),
-      Self::Accumulator => None,
+      Self::Accumulator | Self::Creative => None,
     }
   }
 }
@@ -261,7 +274,7 @@ struct RelayMove {
   out: i32,
 }
 
-/// The registry keys this port resolves once per pass: the four blocks and the four spools.
+/// The registry keys this port resolves once per pass: the five blocks and the four spools.
 #[derive(Clone, Copy)]
 struct Keys {
   small: BlockKey,
@@ -269,6 +282,7 @@ struct Keys {
   accumulator: BlockKey,
   relay: BlockKey,
   light: BlockKey,
+  creative: BlockKey,
   spool: ItemKey,
   copper: ItemKey,
   gold: ItemKey,
@@ -288,6 +302,7 @@ impl Keys {
       accumulator: host.block_key(ACCUMULATOR)?,
       relay: host.block_key(RELAY)?,
       light: host.block_key(LIGHT_CONNECTOR)?,
+      creative: host.block_key(CREATIVE)?,
       spool: item(SPOOL)?,
       copper: item(COPPER_SPOOL)?,
       gold: item(GOLD_SPOOL)?,
@@ -307,6 +322,8 @@ impl Keys {
       Some(Kind::Relay)
     } else if block == self.light {
       Some(Kind::Light)
+    } else if block == self.creative {
+      Some(Kind::Creative)
     } else {
       None
     }
@@ -1314,6 +1331,15 @@ pub(crate) fn level_ticked(
       accumulator_output(host, level, *pos, tower.role(*pos));
     }
   }
+  // Every creative generator offers its six neighbours a fill each tick, after the towers have
+  // formed (an accumulator beside one answers the pool) and before the wire networks move this
+  // tick's energy, so a connector beside one is filled by the generator's own tick as upstream's
+  // `CreativeEnergyBlockEntity.tick` does — not only by its pull.
+  for (pos, saved) in &blocks {
+    if saved.kind == Kind::Creative {
+      creative_push(host, level, *pos);
+    }
+  }
   let nodes: Vec<(PortMember, Vec<SavedWire>)> = blocks
     .iter()
     .flat_map(|(pos, saved)| ports_of(*pos, saved))
@@ -1624,6 +1650,75 @@ const TRANSFER_CAP: u32 = ACCUMULATOR_TRANSFER as u32;
 /// The accumulator's capability handler at one position, for `Registrar::block_capability_before_game`.
 pub(crate) fn accumulator_energy(level: LevelRef, pos: Pos) -> Box<dyn mod_api::EnergyHandler> {
   Box::new(AccumulatorEnergy { level, pos })
+}
+
+// --- the creative generator ----------------------------------------------
+
+/// What the creative generator holds and calls its capacity (`CreativeEnergyStorage`:
+/// `getEnergyStored`/`getMaxEnergyStored` are `Integer.MAX_VALUE`).
+const CREATIVE_SUPPLY: u32 = u32::MAX;
+
+/// The creative generator's energy as the game asks for it: an unlimited source that gives
+/// whatever is asked and takes nothing (`CreativeEnergyStorage`, registered on the block
+/// entity in `CreativeEnergyBlockEntity.registerCapabilities`).
+struct CreativeSupply;
+
+impl mod_api::EnergyHandler for CreativeSupply {
+  fn amount(&self, _host: &mut dyn ServerHost) -> u32 {
+    CREATIVE_SUPPLY
+  }
+
+  fn capacity(&self, _host: &mut dyn ServerHost) -> u32 {
+    CREATIVE_SUPPLY
+  }
+
+  fn insert(&self, _host: &mut dyn ServerHost, _tx: &mod_api::Transaction, amount: u32) -> u32 {
+    creative_insert(amount)
+  }
+
+  fn extract(&self, _host: &mut dyn ServerHost, _tx: &mod_api::Transaction, amount: u32) -> u32 {
+    creative_extract(amount)
+  }
+}
+
+/// What the generator gives one caller: what it asked for, up to the supply it holds
+/// (`CreativeEnergyStorage.extractEnergy` returns `maxExtract` unchanged; the supply is the
+/// largest `u32`, so no caller can ask for more than it holds).
+fn creative_extract(asked: u32) -> u32 {
+  asked
+}
+
+/// What the generator takes: nothing (`CreativeEnergyStorage.receiveEnergy` returns 0).
+fn creative_insert(_amount: u32) -> u32 {
+  0
+}
+
+/// The creative generator's capability handler, for `Registrar::block_capability_before_game`.
+pub(crate) fn creative_supply() -> Box<dyn mod_api::EnergyHandler> {
+  Box::new(CreativeSupply)
+}
+
+/// What the creative generator offers each neighbour every tick
+/// (`CreativeEnergyBlockEntity.tick`: `ies.receiveEnergy(Integer.MAX_VALUE, false)`); the
+/// neighbour's own insert is what caps it.
+fn creative_offer() -> u32 {
+  u32::MAX
+}
+
+/// The creative generator's own tick (`CreativeEnergyBlockEntity.tick`): it offers every
+/// neighbouring storage a full fill each tick, and the engine's `insert` caps it at what that
+/// neighbour takes (a connector's 1,000 FE window, an accumulator's 5,000 FE a call). Upstream
+/// caches the six capabilities and refreshes them on a neighbour change; a package re-reads them
+/// every pass, so there is no cache to hold.
+fn creative_push(host: &mut dyn ServerHost, level: LevelRef, pos: Pos) {
+  for side in Direction::ALL {
+    let at = offset(pos, side);
+    let Some(sink) = level.capability(host, &ENERGY, at, Some(side.opposite())) else {
+      continue;
+    };
+    let offer = creative_offer();
+    let _ = host.transaction(|host, tx| Ok::<u32, ()>(sink.insert(host, tx, offer)));
+  }
 }
 
 // --- the modular accumulator tower ----------------------------------------
@@ -2465,6 +2560,16 @@ fn info_line(host: &dyn Host, level: LevelRef, pos: Pos, saved: &Saved) -> Strin
         time
       );
     }
+    if saved.kind == Kind::Creative {
+      return format!(
+        "{} at {},{},{}: infinite FE (t={})",
+        Kind::Creative.label(),
+        pos[0],
+        pos[1],
+        pos[2],
+        time
+      );
+    }
     let tower = tower_saved(&saved.nbt, pos);
     let charge = tower_amount(host, level, tower).max(0);
     let capacity = tower.capacity();
@@ -2612,6 +2717,18 @@ pub(crate) fn command_energy(host: &mut dyn ServerHost, command: &CommandInvocat
       return;
     }
     feedback(host, &reply(tag, format!("Energy set to {after} FE.")));
+    return;
+  }
+  if saved.kind == Kind::Creative {
+    // Its supply is its own handler (`CreativeSupply`), not a saved charge: there is nothing a
+    // write here could set.
+    feedback(
+      host,
+      &reply(
+        tag,
+        "The creative generator makes its own energy; nothing to set.".to_owned(),
+      ),
+    );
     return;
   }
   let after = clamped(amount, saved.kind.capacity());
@@ -3736,6 +3853,97 @@ mod tests {
       signals.value("minecraft:the_end", pos),
       Some(15),
       "the tower's own answer is kept"
+    );
+  }
+
+  // --- the creative generator ----------------------------------------------
+
+  #[test]
+  fn the_creative_generator_stores_and_gives_without_limit() {
+    // `CreativeEnergyStorage`: `getEnergyStored`/`getMaxEnergyStored` are `Integer.MAX_VALUE`,
+    // `extractEnergy(max)` gives `max`, and `receiveEnergy` refuses everything.
+    assert_eq!(
+      CREATIVE_SUPPLY,
+      u32::MAX,
+      "the creative generator's stored and capacity are the largest number, as upstream's Integer.MAX_VALUE is"
+    );
+    let asked = 12_345_u32;
+    assert_eq!(
+      creative_extract(asked),
+      asked,
+      "it gives exactly what is asked (Integer.MAX_VALUE is more than any caller asks)"
+    );
+    assert_eq!(
+      creative_insert(asked),
+      0,
+      "it takes nothing: `canReceive` is false"
+    );
+  }
+
+  #[test]
+  fn a_connector_mounted_on_the_creative_generator_settles_pulling() {
+    // `CreativeEnergyStorage.canExtract` true, `canReceive` false ⇒ `ConnectorMode.test` Pull.
+    for face in Direction::ALL {
+      assert_eq!(
+        mounted_mode(Some(Kind::Creative), false, face),
+        Mode::Pull,
+        "the creative generator at {face:?} is a source"
+      );
+    }
+    let buffer = Kind::Creative.buffer();
+    assert_eq!(
+      buffer.max_insert, 0,
+      "the generator cannot be filled, so a connector on it never settles push"
+    );
+    assert!(
+      buffer.max_extract > 0,
+      "the generator gives, so a connector on it pulls"
+    );
+  }
+
+  #[test]
+  fn the_creative_generator_offers_every_neighbour_everything() {
+    assert_eq!(
+      creative_offer(),
+      u32::MAX,
+      "upstream offers Integer.MAX_VALUE and the neighbour's own insert caps it, so asking for less would cap a large sink"
+    );
+  }
+
+  #[test]
+  fn the_creative_generator_wire_rig_delivers_a_thousand_fe_a_tick() {
+    // The e2e's rig in the rules: the generator → a pull connector (1,000 FE/t) → the network
+    // pool → a push connector (1,000 FE/t) → the accumulator. The pool's double buffer means
+    // the first tick primes it and delivers nothing; every tick after that delivers 1,000.
+    let capacity = buffer_capacity(2, 1_000);
+    let mut pool = Pool::default();
+    let mut sink = 0;
+    let mut delivered = Vec::new();
+    for _ in 0..21 {
+      pool.swap();
+      let pulled = pull_amount(
+        1_000,
+        i32::try_from(creative_offer()).unwrap_or(i32::MAX),
+        pool.room(capacity),
+      );
+      pool.put(pulled, capacity);
+      let pushed = push_amount(1_000, 2_000_000 - sink, pool.ready);
+      pool.take(pushed);
+      sink += pushed;
+      delivered.push(pushed);
+    }
+    assert_eq!(
+      delivered[0], 0,
+      "the first tick only primes the pool's double buffer"
+    );
+    assert_eq!(
+      &delivered[1..],
+      &[1_000; 20][..],
+      "the twenty ticks after the window filled deliver exactly 1,000 FE each: 20,000 in all"
+    );
+    assert_eq!(
+      sink, 20_000,
+      "the accumulator gains 20,000 FE over the 20 measured ticks"
     );
   }
 }

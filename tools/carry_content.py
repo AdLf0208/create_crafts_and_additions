@@ -30,13 +30,14 @@ ROOT = Path(__file__).resolve().parents[1]
 JAR = ROOT.parent / "_shared/licence-cache/createaddition-1.7.2.jar"
 NS = "createaddition"
 
-# The slice's five blocks and seven items (FINDINGS.md, "Jar inventory").
+# The slice's six blocks and seven items (FINDINGS.md, "Jar inventory").
 BLOCKS = [
     "connector",
     "large_connector",
     "small_light_connector",
     "modular_accumulator",
     "redstone_relay",
+    "creative_energy",
 ]
 ITEMS = [
     "copper_wire",
@@ -76,6 +77,9 @@ BLOCK_MODELS = [
     "block/redstone_relay/redstone_relay_off",
     "block/redstone_relay/redstone_relay_on",
     "block/redstone_relay/item",
+    # The creative generator's crate: the jar's own two-element model (0.2.7).
+    "block/creative_energy/block",
+    "block/creative_energy/item",
 ]
 ITEM_MODELS = [f"item/{item}" for item in ITEMS] + [
     "item/connector",
@@ -83,6 +87,7 @@ ITEM_MODELS = [f"item/{item}" for item in ITEMS] + [
     "item/small_light_connector",
     "item/modular_accumulator",
     "item/redstone_relay",
+    "item/creative_energy",
 ]
 # Textures no carried model names (the accumulator's gauge is drawn by its
 # block entity in upstream; the lamp's bulb has a lit and a dark texture).
@@ -92,8 +97,20 @@ EXTRA_TEXTURES = [
     "block/modular_accumulator/gauge",
 ]
 # The relay's blockstate is the jar's own 16-variant table: it names only this
-# mod's models and the `facing`/`powered`/`vertical` properties this port declares.
-VERBATIM_BLOCKSTATES = ["modular_accumulator", "redstone_relay"]
+# mod's models and the `facing`/`powered`/`vertical` properties this port declares. The creative
+# generator's has one variant (`""`) and names its own crate model; both are carried verbatim.
+VERBATIM_BLOCKSTATES = ["modular_accumulator", "redstone_relay", "creative_energy"]
+
+# The creative generator's model is the jar's own, but all three of its texture slots name
+# Create's (`crate_creative`, `creative_fluid_tank`). Create is not installed here and its assets
+# are not in this artefact, so the two textures are **generated** below: deterministic 16x16 PNGs,
+# drawn by this script, which keeps the block off the missing-texture checker and leaves the
+# upstream art out of the package (CONTENT.md records it).
+CREATIVE_TEXTURES = {
+    "create:block/crate_creative": f"{NS}:block/creative_energy/crate",
+    "create:block/creative_fluid_tank": f"{NS}:block/creative_energy/tank",
+}
+GENERATED_TEXTURES = ["block/creative_energy/crate", "block/creative_energy/tank"]
 
 
 def model_textures(jar: zipfile.ZipFile, models: list[str]) -> list[str]:
@@ -171,6 +188,9 @@ LANG_KEYS = [
     "block.createaddition.small_light_connector",
     "block.createaddition.modular_accumulator",
     "block.createaddition.redstone_relay",
+    "block.createaddition.creative_energy",
+    "block.createaddition.creative_energy.tooltip",
+    "block.createaddition.creative_energy.tooltip.summary",
     "item.createaddition.copper_wire",
     "item.createaddition.gold_wire",
     "item.createaddition.electrum_wire",
@@ -220,6 +240,79 @@ def patched_model(jar: zipfile.ZipFile, member: str) -> str:
             if isinstance(value, str) and value.startswith("create:"):
                 textures[key] = f"{NS}:block/connector/connector"
     return json.dumps(model, indent=2) + "\n"
+
+
+def creative_model(jar: zipfile.ZipFile, member: str) -> str:
+    """The creative generator's model with Create's two textures replaced by the generated ones.
+
+    Every other carried model names only this mod's textures; this one is a Create crate in
+    upstream and names both of Create's. The elements, UVs and display block are the jar's.
+    """
+    model = json.loads(jar.read(f"assets/{member}"))
+    textures = model.get("textures")
+    if isinstance(textures, dict):
+        for key, value in list(textures.items()):
+            if value in CREATIVE_TEXTURES:
+                textures[key] = CREATIVE_TEXTURES[value]
+    return json.dumps(model, indent=2) + "\n"
+
+
+def creative_crate_pixels() -> list[list[int]]:
+    """A 16x16 crate face: a metal border and a cyan diamond on a dark plate."""
+    rows = []
+    for y in range(16):
+        row: list[int] = []
+        for x in range(16):
+            border = x in (0, 15) or y in (0, 15)
+            diamond = abs(x - 7.5) + abs(y - 7.5) <= 5.0
+            if border:
+                row += [0x5A, 0x63, 0x70, 0xFF]
+            elif diamond:
+                row += [0x38, 0xD9, 0xF0, 0xFF]
+            else:
+                row += [0x22, 0x2A, 0x30, 0xFF]
+        rows.append(row)
+    return rows
+
+
+def creative_tank_pixels() -> list[list[int]]:
+    """A 16x16 tank face: bright vertical cooling lines between dark plates."""
+    rows = []
+    for y in range(16):
+        row: list[int] = []
+        for x in range(16):
+            if y in (0, 15):
+                row += [0x6E, 0x77, 0x82, 0xFF]
+            elif x % 4 == 0:
+                row += [0x2F, 0xB8, 0xC9, 0xFF]
+            else:
+                row += [0x1A, 0x3B, 0x43, 0xFF]
+        rows.append(row)
+    return rows
+
+
+def write_png(path: Path, pixels: list[list[int]]) -> None:
+    """Write an RGBA PNG with no external dependency (deterministic bytes for these pixels)."""
+    import struct
+    import zlib
+
+    width = len(pixels[0])
+    height = len(pixels)
+    raw = b"".join(b"\x00" + bytes(row) for row in pixels)
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(raw, 9))
+        + chunk(b"IEND", b"")
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(png)
 
 
 def loot_table_26_3(jar: zipfile.ZipFile, block: str) -> str:
@@ -438,6 +531,37 @@ def build(root: Path) -> None:
         json.dumps(relay, indent=2) + "\n",
     )
 
+    # The creative generator: upstream's `CreativeEnergyBlock` only borrows Create's `CrateBlock`
+    # for its look. Its shape is `CREATIVE_ENERGY_SHAPE` (1,0,1,15,16,15 plus 0,2,0,16,14,16), and
+    # it declares no energy buffer of its own: its capability is the port's unlimited handler.
+    creative = {
+        "template": "minecraft:iron_block",
+        "item": True,
+        "properties": {
+            "hardness": 2.0,
+            "explosion_resistance": 6.0,
+            "requires_tool": True,
+            "sounds": "minecraft:copper_block",
+        },
+        "shapes": {
+            "default": [
+                [0.0625, 0.0, 0.0625, 0.9375, 1.0, 0.9375],
+                [0.0, 0.125, 0.0, 1.0, 0.875, 1.0],
+            ],
+        },
+        "collision_shapes": {
+            "default": [
+                [0.0625, 0.0, 0.0625, 0.9375, 1.0, 0.9375],
+                [0.0, 0.125, 0.0, 1.0, 0.875, 1.0],
+            ],
+        },
+    }
+    write(
+        root,
+        f"data/{NS}/horizon/block/creative_energy.json",
+        json.dumps(creative, indent=2) + "\n",
+    )
+
     # --- items -------------------------------------------------------------
     # The jar's items carry no components; the templates only set the stack
     # size and the look, and the look is overridden by the carried model.
@@ -470,7 +594,14 @@ def build(root: Path) -> None:
 
     # --- models and textures ----------------------------------------------
     for model in BLOCK_MODELS:
-        write(root, f"assets/{NS}/models/{model}.json", patched_model(jar, f"{NS}/models/{model}.json"))
+        if model.startswith("block/creative_energy/"):
+            write(
+                root,
+                f"assets/{NS}/models/{model}.json",
+                creative_model(jar, f"{NS}/models/{model}.json"),
+            )
+        else:
+            write(root, f"assets/{NS}/models/{model}.json", patched_model(jar, f"{NS}/models/{model}.json"))
     for model in ITEM_MODELS:
         copy(root, jar, f"{NS}/models/{model}.json")
     textures = model_textures(jar, BLOCK_MODELS + ITEM_MODELS) + EXTRA_TEXTURES
@@ -480,6 +611,14 @@ def build(root: Path) -> None:
             copy(root, jar, member)
         else:
             print(f"texture not in the jar: {member}", file=sys.stderr)
+    # The creative generator's two textures are drawn here, not carried: upstream's model names
+    # Create's crate art, which is not in this artefact (see CREATIVE_TEXTURES).
+    for texture, pixels in zip(
+        GENERATED_TEXTURES,
+        [creative_crate_pixels(), creative_tank_pixels()],
+        strict=True,
+    ):
+        write_png(root / "assets" / NS / "textures" / f"{texture}.png", pixels)
 
     # --- 26.3 item definitions --------------------------------------------
     for item in ITEMS + [
@@ -488,6 +627,7 @@ def build(root: Path) -> None:
         "small_light_connector",
         "modular_accumulator",
         "redstone_relay",
+        "creative_energy",
     ]:
         write(
             root,

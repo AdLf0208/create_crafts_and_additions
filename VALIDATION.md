@@ -1,4 +1,81 @@
-# Validation — Create Crafts & Additions slices 1–6
+# Validation — Create Crafts & Additions slices 1–8
+
+## 0.2.7 — the creative generator
+
+Pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (nightly 2026-11-20), mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`; every cargo step inside one
+`ports/tools/build-slot.sh` lease (`CARGO_INCREMENTAL=0`, no `--target-dir`, `BUILD_LOCAL=1`).
+The in-game legs use the launcher-built game (`ports/tools/launcher-game.sh`, launcher 0.2.92,
+`Compiling createaddition (1 of 1)`); the creative-generator build is
+`native-0a875da-a4f96b049501`.
+
+Logs: `ports/_shared/evidence/createaddition/` (`creative-red.log`, `creative-build-*.log`,
+`creative-check.log`, `creative-fits-pin.log`, `creative-fits-other.log`, `creative-launcher-build.log`,
+`sdk-*.log`, `verify-sdk-package.log`) and `ports/_shared/evidence/createaddition-e2e/`
+(`e2e-creative-*.log`).
+
+```
+red, pre-slice generator rules   3 failed: 77 passed  (creative-red.log)
+  stored/capacity                left: 0   right: 4294967295
+  the wire rig's 20 ticks        left: [0; 20]   right: [1000; 20]
+  the per-tick offer             left: 0   right: 4294967295
+cargo test --offline             80 passed, 0 failed              (sdk-test.log, regenerated)
+cargo clippy --all-targets --offline -- -D warnings   exit 0, 0 warnings (sdk-clippy.log)
+cargo fmt --check                clean                            (sdk-fmt.log)
+rm -f Cargo.lock && cargo horizon-mod build           exit 0       (creative-build-1.log)
+cargo horizon-mod build (again)  byte-identical (cmp)             (creative-build-2/3.log)
+cargo horizon-mod check createaddition.hmod           exit 0       (creative-check.log)
+fits --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a  "0a875da  made for" (creative-fits-pin.log)
+fits --build 0b14f8acfd97fa2c750e42795249dcc981178ca4  "does not fit: 1 item changed
+                                                       the method `BlockStates::light_emission` (removed)"
+                                                                    (creative-fits-other.log)
+python3 tools/data_shape.py createaddition.hmod   6/6 26.3 loot tables
+python3 tools/carry_content.py --check    assets/ and data/ match the jar carry
+python3 tools/check_licence.py    upstream notice verbatim       (licence-notice.log)
+python3 ports/tools/verify-sdk-package.py createaddition   1/1     (verify-sdk-package.log)
+```
+
+Deliverable: `createaddition.hmod`, **178,357 B**, SHA-256
+`8387f865ed975963a9b7bd5b1d1d602434977c43a288dc0399e4cdbf962ad9b6`, **117 entries**, reproducible
+(three builds, two `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too); 86 `assets/` + 20 `data/`.
+
+```
+createaddition 0.2.7 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  178357 bytes, SHA-256 8387f865ed975963a9b7bd5b1d1d602434977c43a288dc0399e4cdbf962ad9b6, unsigned
+```
+
+```
+Create Crafts & Additions:
+0a875da  made for
+Create Crafts & Additions:
+0b14f8a  does not fit: 1 item changed
+    the method `BlockStates::light_emission` (removed)
+```
+
+**The second `fits` run is red and that is the measured finding**: the lamp's `light_emission`
+surface (0.2.5) does not exist at `0b14f8a`. This slice adds no new API surface.
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-creative-default.log` | `PASS` + `EXIT:0` | A–K unchanged, plus **L**: `createaddition:creative_energy` placed and read back, its readout `infinite FE`, a connector settled `pull` (state + readout), the sink gaining **exactly 1,000 FE/t** (30,000 over 30 ticks; 20,000 in the 20-tick window), **stone in its place moving nothing** over 31 ticks, and a generator beside an accumulator filling it at 5,000/t with no connector; H now drops one of all six blocks |
+| `e2e-creative-selftest.log` | `FAIL` + `EXIT:1` | `CREATIVE_SELFTEST: the creative generator supplied 31000 FE, so the assertion is alive` |
+| `e2e-creative-suite-selftest.log` | `FAIL` + `EXIT:1` | the suite's conservation counterfactual (`SELFTEST`) |
+| `e2e-creative-control.log` | `FAIL` + `EXIT:1` | the package-less game has no accumulator item (`ctl give` exits 1); the default run's control leg also refuses the generator id |
+
+`python3 ports/tools/check-e2e-logs.py createaddition createaddition-e2e --strict`:
+**logs=29 ok=29 missing-exit=0 bad-exit=0**.
+
+## The energy meter: blocked (not in the artefact) — the brief before this package
+
+**No package was built and no version was bumped for it.** That brief's slice, `energy_meter`, is not in
+the audited jar `createaddition-1.7.2.jar` (`71e9c3ac…3414`, 1,772,844 B): 0 entries under
+`blocks/energy_meter`, no blockstate/model/item/loot/lang key, and only an orphan
+`textures/item/multimeter.png`. On upstream `1.21.1` (`658a390`) all three `energy_meter` files are
+commented out and nothing registers `EnergyMeter`. The transcript is
+`ports/_shared/evidence/createaddition/energy-meter-artefact.log`; the decision is
+`notes.md` → `## Slice 7 — the energy meter: blocked, not in the artefact`. The slice it proposed
+instead is the 0.2.7 creative generator, above.
 
 ## 0.2.6 — the accumulator's comparator output
 

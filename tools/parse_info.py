@@ -34,6 +34,10 @@ RELAY = re.compile(
 ACCUMULATOR = re.compile(
     r"^Modular Accumulator at (-?\d+),(-?\d+),(-?\d+): (\d+)/(\d+) FE \(t=(\d+)\)$"
 )
+# The creative generator: `Creative Generator at 180,100,0: infinite FE (t=1234)`.
+CREATIVE = re.compile(
+    r"^Creative Generator at (-?\d+),(-?\d+),(-?\d+): infinite FE \(t=(\d+)\)$"
+)
 # A formed tower: `... 5000000/6000000 FE, tower 1x3 at 220,100,0 (t=1234)`.
 TOWER = re.compile(
     r"^Modular Accumulator at (-?\d+),(-?\d+),(-?\d+): (\d+)/(\d+) FE, "
@@ -114,6 +118,28 @@ def main() -> int:
             "pool_ready": ready,
             "pool_next": next_,
             "demand": demand,
+            "t": ticks,
+        }
+        for name, value in values.items():
+            print(f"{name}={value}")
+        print("ok=1")
+        return 0
+    match = CREATIVE.match(line)
+    if match:
+        x, y, z, ticks = match.groups()
+        values = {
+            "kind": "creative",
+            "large": 0,
+            "x": x,
+            "y": y,
+            "z": z,
+            "mode": "none",
+            "energy": 0,
+            "capacity": 0,
+            "links": 0,
+            "pool_ready": 0,
+            "pool_next": 0,
+            "demand": 0,
             "t": ticks,
         }
         for name, value in values.items():

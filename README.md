@@ -1,10 +1,11 @@
-# Create Crafts & Additions — Horizon port (slices 1–6: the FE half)
+# Create Crafts & Additions — Horizon port (slices 1–8: the FE half)
 
 A native Horizon port of **Create Crafts & Additions 1.7.2** (`MRH0/createaddition`, **MIT**): the
 electric half of the mod — two connectors, wire links and the modular accumulator, including the
 jar's 3×3×5 accumulator multiblock and its comparator output, the redstone relay that bridges one
-wire network into another while powered, and the small light connector whose lamp draws one FE a
-tick and lights while its network pays it — with the jar's own transfer rates.
+wire network into another while powered, the small light connector whose lamp draws one FE a
+tick and lights while its network pays it, and the creative generator that gives without limit —
+with the jar's own transfer rates.
 
 **LOCAL-ONLY** until the maintainer approves publishing (ARCHITECTURE.md §8). MIT is licence rank 0
 (permissive); the approval is still required.
@@ -25,15 +26,15 @@ carried `assets/` and `data/`. One `createaddition.hmod` installs both — there
 file, no `.horizon-cache` write and no dev-mod list to manage (the retired 0.1.0 `.hnmod` embedded
 the content that way; see `notes.md`).
 
-Five blocks and seven items:
+Six blocks and seven items:
 
 | Kind | Ids |
 |---|---|
-| Blocks | `createaddition:connector`, `createaddition:large_connector`, `createaddition:small_light_connector`, `createaddition:modular_accumulator`, `createaddition:redstone_relay` |
+| Blocks | `createaddition:connector`, `createaddition:large_connector`, `createaddition:small_light_connector`, `createaddition:modular_accumulator`, `createaddition:redstone_relay`, `createaddition:creative_energy` |
 | Items | `createaddition:copper_wire`, `gold_wire`, `electrum_wire`, `spool`, `copper_spool`, `gold_spool`, `electrum_spool` |
 
 Each block drops itself when mined with a pickaxe (its own 26.3 loot table, and the carried
-`minecraft:mineable/pickaxe` tag); the five blocks are also creative-obtainable.
+`minecraft:mineable/pickaxe` tag); the six blocks are also creative-obtainable.
 
 ## What it does
 
@@ -72,10 +73,17 @@ Each block drops itself when mined with a pickaxe (its own 26.3 loot table, and 
   is set and it emits block light **15**; at the bottom clamp it goes dark (`dynamic_light`, answered
   from the state by the block's Part). It is a consumer, not a buffer: it declares the small
   connector's 1,000 FE window and no way to give energy back to its network.
+- The **creative generator** is an unlimited FE source, as upstream's `CreativeEnergyStorage` is:
+  its `ENERGY` capability answers `u32::MAX` stored and capacity, gives whatever is asked and
+  takes nothing — a connector mounted on it settles `pull` and a wire carries 1,000 FE a tick.
+  Every tick it also offers each of its six neighbours a full fill
+  (`receiveEnergy(Integer.MAX_VALUE, false)`), so an accumulator beside it fills at that block's
+  5,000 FE a tick with no connector at all.
 - FE is moved through the engine's `ENERGY` capability (`LevelRef::capability` +
   `EnergyHandler::insert`/`extract`, and `move_energy` for the accumulator), never created: the
   runtime's own conservation test and the in-game check both prove source + sink + buffer is
-  constant.
+  constant. The creative generator is the one block whose energy is deliberately not conserved —
+  it is the source.
 
 ## Commands
 
@@ -87,14 +95,14 @@ reply repeats as ` [#tag]` so a harness can tell answers apart. The readout text
 ## Layout
 
 ```
-horizon-mod.toml               the only manifest and identity: id, version 0.2.6, api 0.2, [native]
+horizon-mod.toml               the only manifest and identity: id, version 0.2.7, api 0.2, [native]
 Cargo.toml                     one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/rustfmt.toml               tab_spaces = 2, the campaign's style (a root one is refused)
 src/lib.rs                     the one impl Hooks: register, level_tick_post, commands
 src/network.rs                 game glue: the block entity Part, the wire links, the pass, commands
 src/runtime.rs                 the pure rules (30 tests), byte-identical to the retired bundle's
-assets/createaddition/         79 carried files: blockstates, models, textures, items, lang
-data/                          18 carried files (incl. the minecraft harvest tag): block and item definitions, loot tables
+assets/createaddition/         86 carried files: blockstates, models, textures, items, lang
+data/                          20 carried files (incl. the minecraft harvest tag): block and item definitions, loot tables
 createaddition.hmod            the deliverable: one file, code + content
 tools/
   carry_content.py [--check]   jar -> assets/ and data/, with the patches documented
@@ -115,7 +123,7 @@ and the old `content/`) is evidence at
 
 ```sh
 cd ports/createaddition
-CARGO_INCREMENTAL=0 cargo test --offline                    # 72 tests
+CARGO_INCREMENTAL=0 cargo test --offline                    # 80 tests
 CARGO_INCREMENTAL=0 cargo clippy --all-targets --offline -- -D warnings
 cargo fmt --check                                           # never --all: it formats the SDK
 rm -f Cargo.lock && cargo horizon-mod build                  # -> target/horizon-mod/createaddition.hmod

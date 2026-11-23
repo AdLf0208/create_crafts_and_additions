@@ -127,6 +127,25 @@ does not try. The `create:` items its recipes need are likewise absent.
   input buffer.
 - No energy capability: the relay is a wire node, not a storage block.
 
+### Creative generator — `blocks/creative_energy/`, `energy/CreativeEnergyStorage.java`
+
+- `CreativeEnergyStorage` (the block entity's registered `Capabilities.Energy.BLOCK` handler,
+  for **every** context): `receiveEnergy` → **0**, `extractEnergy(maxExtract)` → **maxExtract**
+  unchanged, `getEnergyStored`/`getMaxEnergyStored` → **`Integer.MAX_VALUE`**, `canExtract` →
+  true, `canReceive` → false.
+- `CreativeEnergyBlockEntity.tick`: after `super.tick()`, for each of the six directions, the
+  cached neighbour capability (created on the first tick, refreshed by `neighborChanged`) gets
+  `ies.receiveEnergy(Integer.MAX_VALUE, false)` — an unlimited offer, which the neighbour's own
+  handler caps.
+- `CreativeEnergyBlock` extends Create's `CrateBlock` **only for the block's look**;
+  `getShape` is `CREATIVE_ENERGY_SHAPE = CAShapes.shape(1,0,1,15,16,15).add(0,2,0,16,14,16)`,
+  and the block registers `CABlockEntities.CREATIVE_ENERGY` for its entity.
+- Content: `blockstates/creative_energy.json` (one variant, `""`),
+  `models/block/creative_energy/{block,item}.json`, `models/item/creative_energy.json`, a 26.3
+  loot table for the jar's 1.21.1 one, and three `en_us` keys (`Creative Generator`, the tooltip
+  title and the summary "Generates an infinite supply of _⚡_."). The model's three texture slots
+  name Create's `crate_creative` / `creative_fluid_tank`, which are **not in this jar**.
+
 ## Where this port differs (declared)
 
 1. **No kinetic half.** `electric_motor`, `alternator`, `rolling_mill`,
@@ -162,3 +181,18 @@ does not try. The `create:` items its recipes need are likewise absent.
    textures and lang only. The blocks/items are creative-obtainable.
 9. **`Passive` mode** is in upstream's enum but unreachable; this port models
    `None/Pull/Push` only.
+10. **The creative generator's supply is a registered handler, not a saved charge** (0.2.7).
+    `Registrar::block_capability_before_game` answers `horizon:energy` with the port's
+    `CreativeSupply` (amount and capacity `u32::MAX`, insert 0, extract what is asked), which is
+    upstream's `CreativeEnergyStorage` on its block entity. The block declares **no**
+    `block_energy`, so there is no compound amount to keep and `/createaddition info` says
+    `infinite FE`; `/createaddition energy` refuses it.
+11. **The generator re-reads its six neighbours every pass** (0.2.7). Upstream caches the six
+    `BlockCapabilityCache`s and refreshes them on `neighborChanged`; a package's pass already
+    walks the block's tick queue, so it asks `LevelRef::capability` per side each tick and there
+    is no cache to invalidate. The offer is the same `Integer.MAX_VALUE`, and the neighbour's
+    own insert caps it (1,000 FE into a connector's window, 5,000 into an accumulator).
+12. **Two generated textures for the creative generator** (0.2.7). The jar's model names
+    Create's crate and tank art, which is not in this artefact; `carry_content.py` draws two
+    deterministic 16×16 PNGs instead, so the block is not the missing-texture checker and no
+    other mod's assets travel in the package.

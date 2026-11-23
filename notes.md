@@ -11,17 +11,19 @@ rewrite, see `FINDINGS.md`).
 **LOCAL-ONLY** until the maintainer approves publishing (ARCHITECTURE.md §8).
 MIT is licence rank 0 (permissive); the approval is still required.
 
-Status: **slice 6 implemented and delivered as a flat SDK package (mod API 0.2), version
-0.2.6** — the two connectors, wire links and the modular accumulator, with the jar's rates and
+Status: **slice 8 implemented and delivered as a flat SDK package (mod API 0.2), version
+0.2.7** — the two connectors, wire links and the modular accumulator, with the jar's rates and
 connection rules, plus the **redstone relay** that bridges one wire network into another while
 powered, the **small light connector** whose lamp draws 1 FE a tick and lights while its network
-pays it, and the accumulator's **comparator output** (the jar's fill fraction), in one
+pays it, the accumulator's **comparator output** (the jar's fill fraction), and the **creative
+generator** whose capability answers infinity and which fills every neighbour each tick, in one
 `createaddition.hmod` that carries the code *and* the content. (0.2.0
 was the migration; 0.2.2 the tower; 0.2.3 the three review fixes, §
 [`## Review fixes — 0.2.3`](#review-fixes--023-pr-1526-2026-11-21); 0.2.4 the relay, §
 [`## Slice 4 — the redstone relay (0.2.4)`](#slice-4--the-redstone-relay-024); 0.2.5 the lamp, §
 [`## Slice 5 — the small light connector (0.2.5)`](#slice-5--the-small-light-connector-025); 0.2.6
-the comparator, § [`## Slice 6 — the accumulator's comparator output (0.2.6)`](#slice-6--the-accumulators-comparator-output-026).) The
+the comparator, § [`## Slice 6 — the accumulator's comparator output (0.2.6)`](#slice-6--the-accumulators-comparator-output-026);
+0.2.7 the creative generator, § [`## Slice 8 — the creative generator (0.2.7)`](#slice-8--the-creative-generator-027).) The
 0.1.0 `.hnmod` was retired by Horizon's mod-API merge (#16941); the migration is
 [`## Migration to the SDK format`](#migration-to-the-sdk-format), and the 0.1.0 in-game evidence
 stays historical (`## Gaps`).
@@ -91,6 +93,11 @@ stays historical (`## Gaps`).
 - **Commands** — the harness's and an admin's interface, because the slice has
   no GUI: `/createaddition info|energy|mode|link|unlink`, each reply optionally
   tagged (`#tag`) so a harness can tell answers apart.
+- **`createaddition:creative_energy`** (0.2.7) — upstream's creative generator: its
+  `ENERGY` capability answers `u32::MAX` stored and capacity, gives whatever is asked and takes
+  nothing, so a connector mounted on it settles **pull**; and each tick it offers every one of
+  its six neighbours a full fill (`receiveEnergy(Integer.MAX_VALUE, false)`), which the
+  neighbour's own insert caps (1,000 into a connector's window, 5,000 into an accumulator).
 
 ## How the energy is booked
 
@@ -222,11 +229,15 @@ The ruling above is about the Java mod; a migration must not carry **our** bugs 
 - ~~**`small_light_connector`** (its 1 FE/t lamp consumption)~~ — **closed in 0.2.5**: the
   lamp draws 1 FE a tick from its network, lights after its position-seeded hysteresis and emits
   block light 15 while lit, § [`## Slice 5`](#slice-5--the-small-light-connector-025).
-- **`creative_energy`**, the e2e's source of last resort: the harness seeds an
-  accumulator with `/createaddition energy` instead.
-- **`portable_energy_interface`**, **`energy_meter`**,
-  **`electric_pump`**, **`digital_adapter`** (the ComputerCraft bridge — CC is
-  an optional dependency and not ported). (`redstone_relay` moved out of this list in 0.2.4.)
+- ~~**`creative_energy`**, the e2e's source of last resort: the harness seeds an
+  accumulator with `/createaddition energy` instead.~~ **Closed in 0.2.7**: the creative
+  generator (infinite capability + per-tick neighbour fill), §
+  [`## Slice 8`](#slice-8--the-creative-generator-027).
+- **`portable_energy_interface`** (needs Create's contraption actor),
+  **`electric_pump`** (extends Create's `PumpBlock`), **`digital_adapter`** (the ComputerCraft
+  bridge — CC is an optional dependency and not ported). (`redstone_relay` moved out of this list
+  in 0.2.4; `energy_meter` is **not in the 1.7.2 jar at all** — it is commented-out dead code on
+  upstream `1.21.1`, § [`## Slice 7`](#slice-7--the-energy-meter-blocked-not-in-the-artefact).)
 - **GUI/tooltips**: no goggles-style readout, no mode wrench, no `PhysicsBlock`/display source for
   the gauge. (The accumulator's comparator output moved out of this line in 0.2.6, §
   [`## Slice 6`](#slice-6--the-accumulators-comparator-output-026).)
@@ -1503,3 +1514,284 @@ the assertion is alive` (`e2e-comparator-selftest.log`, `EXIT:1`).
    path only; the comparator block itself is vanilla, so its model, mode and delay are the game's.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review
+
+---
+
+## Slice 7 — the energy meter: **blocked, not in the artefact**
+
+### The slice the brief named
+
+The 0.2.6 report's next-slice proposal and this port's `## Gaps` between them named:
+
+> **`portable_energy_interface`**, **`energy_meter`**, **`electric_pump`**, **`digital_adapter`** …
+
+The brief for 0.2.7 fixed `energy_meter`: place it in the
+`accumulator – connector – wire – connector – accumulator` rig, run 1,000 FE/t for 20 ticks, then
+read its `/createaddition info` **and** the comparator wire's `power`.
+
+### Why it cannot be built: the artefact does not contain it
+
+`AGENTS.md` ("A brief may not invent a mod's contents from its name … when a brief and the
+artefact disagree, the artefact wins and the agent stops and reports") and the brief's own stop
+condition ("Stop and report instead of guessing if the gap list has nothing implementable") apply.
+Evidence, all in `ports/_shared/evidence/createaddition/energy-meter-artefact.log`:
+
+| check | result |
+|---|---|
+| `sha256sum`/`stat` of the audited jar | `createaddition-1.7.2.jar`, `71e9c3ac…3414`, 1,772,844 B |
+| jar entries matching `meter` | only `assets/createaddition/textures/item/multimeter.png` (an orphan texture) |
+| jar entries under `blocks/energy_meter` | **0** |
+| the jar's 25 blockstates | no `energy_meter` (they do include `redstone_relay`, `small_light_connector`, `creative_energy`) |
+| the jar's `en_us.json` | no `energy_meter`/`multimeter` key |
+| upstream repo `658a390` (1.21.1, analysis only) | `EnergyMeterBlock.java`, `EnergyMeterBlockEntity.java`, `EnergyMeterRenderer.java` all open with `/*` — **commented out** |
+| registrations of `EnergyMeter`/`ENERGY_METER` outside that folder | **0** |
+
+The family is 1.7.3-dev dead code: `gradle.properties` is `mod_version=1.7.3`, the pack jar is
+`1.7.2`, and `EnergyMeterBlock.newBlockEntity` even points at `CATileEntities.REDSTONE_RELAY`, a
+copy-paste leftover. Nothing ships it: no block, item, blockstate, model, loot table, lang key or
+recipe. Implementing it would be inventing a feature the mod does not have, which the brief and
+`AGENTS.md` forbid.
+
+Contrast with the four slices already delivered: the accumulator's `hasAnalogOutputSignal` /
+`getAnalogOutputSignal` are in the 1.7.2 jar (its class strings), and `redstone_relay` and
+`small_light_connector` are in the jar's blocks, blockstates and models. Every earlier slice is in
+the artefact; this one is not.
+
+### What was and was not done
+
+- **No code was written**, so there is no red to quote and no green to claim. TDD's "no production
+  code without a failing test" never started.
+- **No version bump, build, `check`, `fits` run or e2e leg** was produced for 0.2.7. The delivered
+  package stays **0.2.6**, 172,461 B, sha256 `9daebe6d…56f4`; its last recorded gate is
+  `0a875da  made for` (pin) / `0b14f8a  does not fit … BlockStates::light_emission (removed)` (the
+  0.2.5 lamp's surface, unchanged).
+- The port's sources, `horizon-mod.toml`/`Cargo.toml` version and package are untouched.
+
+### Coverage
+
+| family | status |
+|---|---|
+| `energy_meter` (the brief's slice) | **blocked(energy_meter-not-in-jar)** — not a block, item, asset or key in `createaddition-1.7.2.jar`; commented-out dead code upstream |
+
+### Next slice
+
+**`creative_energy`** (the "Creative Generator"), the one remaining FE family that *is* in the jar
+and needs no Create network: `assets/createaddition/blockstates/creative_energy.json`, its two
+models and item model, its loot table and lang all exist, and the classes are live. (Its Java class
+extends Create's `CrateBlock`, but only for the block's shape; the energy behaviour is
+self-contained.) Gap line: "**`creative_energy`**, the e2e's source of last resort: the harness seeds
+an accumulator with `/createaddition energy` instead." Tier `deep` fits: a block entity whose
+`ENERGY` capability answers infinite stored/capacity and `extract == maxExtract`, plus a per-tick
+push into every neighbouring storage (upstream `CreativeEnergyBlockEntity.tick` →
+`ies.receiveEnergy(Integer.MAX_VALUE, false)`). It is a source rather than a rule, but it is the last
+implementable FE family and it retires the "no in-game source of last resort" gap.
+
+Assertion for that slice: place `createaddition:creative_energy` beside a `push` connector linked to
+a second connector on a `modular_accumulator`; `ctl block` at the creative block reads
+`createaddition:creative_energy`, the source connector settles `mode pull`, and the accumulator's
+`/createaddition info … #tag` rises by **20,000 FE over 20 game ticks** (1,000 FE/t on the wire,
+measured after the connector's window has filled so the one-time window is excluded). Differential:
+the same rig with `minecraft:stone` in place of the creative block moves nothing; a
+`CREATIVE_SELFTEST=1` leg inverts the gain assertion and exits 1.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices (loaded; no Rust change — slice blocked before code)
+
+---
+
+## Slice 8 — the creative generator (0.2.7)
+
+### The slice, and the gap line it comes from
+
+The 0.2.6 report's `## Next slice` (and `## Slice 7`'s proposal) named it:
+
+> **Gaps**: "**`creative_energy`**, the e2e's source of last resort: the harness seeds an
+> accumulator with `/createaddition energy` instead."
+
+**Choice.** It is the one remaining family of the jar's FE half that is *in the artefact* and needs
+no Create: `assets/createaddition/blockstates/creative_energy.json`, its two block models and item
+model, its loot table and three `en_us` keys are all there, and `CreativeEnergyBlock` /
+`CreativeEnergyBlockEntity` / `CreativeEnergyStorage` are live classes (unlike `energy_meter`, §
+[`## Slice 7`](#slice-7--the-energy-meter-blocked-not-in-the-artefact)). It is a source rather than
+a rule, but it retires "there is no in-game source of last resort" and it is provable in game with
+a rate assertion that can fail.
+
+**Tier fit.** `deep`: one more member of the existing block entity type, a capability handler
+registered ahead of the game's (`Registrar::block_capability_before_game`), a per-tick neighbour
+pass, and carried content (its state, models, two **generated** textures, loot table, lang, block
+declaration and tag entry). No renderer, no dimension, no entity AI.
+
+**Upstream behaviour read** (repo `658a390b…`, analysis only; `FINDINGS.md` → "Creative
+generator"): `CreativeEnergyStorage` (stored/capacity `Integer.MAX_VALUE`, `extractEnergy` returns
+`maxExtract`, `receiveEnergy` returns 0, `canExtract` true, `canReceive` false) and
+`CreativeEnergyBlockEntity.tick` (per side, `ies.receiveEnergy(Integer.MAX_VALUE, false)`).
+`CreativeEnergyBlock` extends Create's `CrateBlock` only for its look; the shape is
+`CAShapes.shape(1,0,1,15,16,15).add(0,2,0,16,14,16)`.
+
+### What it does
+
+- **An unlimited source.** `CreativeSupply` answers the `ENERGY` capability for
+  `createaddition:creative_energy` ahead of any declaration: `amount`/`capacity` are `u32::MAX`,
+  `insert` returns 0, `extract` returns what is asked. There is no saved charge and no
+  `block_energy` declaration. A connector mounted on it settles **pull** (its declaration gives and
+  never takes), and a wire drains it at the connector's 1,000 FE a tick.
+- **A per-tick fill of every neighbour.** After the towers have formed and before the wire
+  network's moves, each generator offers all six neighbours `creative_offer() = u32::MAX`; the
+  engine's `insert` caps each at what that neighbour takes. A connector's 1,000 FE window fills; an
+  accumulator beside it takes 5,000 FE a tick. Re-read every pass — no capability cache to
+  invalidate (deviation 11).
+- **Content.** The jar's own one-variant blockstate and two-element crate model (its elements, UVs
+  and display untouched), the item model and 26.3 item definition, the loot table (26.3 dialect),
+  the block declaration with the jar's `CREATIVE_ENERGY_SHAPE`, the harvest-tag entry and the lang
+  keys. The model's three texture slots name **Create's** `crate_creative`/`creative_fluid_tank`;
+  since Create is not installed and its art is not in this artefact, `carry_content.py` **draws**
+  two deterministic 16×16 PNGs (`block/creative_energy/{crate,tank}.png`) and points the model at
+  them (deviation 12).
+- **No new API.** `block_capability_before_game`, the `ENERGY` trait and `LevelRef::capability` are
+  all at the pin; this slice adds no surface (the second `fits` line is red only for the 0.2.5
+  lamp's `light_emission`, below).
+
+### Red → green (TDD)
+
+The new rules went in first, against stubs (`CREATIVE_SUPPLY` 0, `creative_offer` 0, the handler
+returning 0). `creative-red.log`, verbatim:
+
+```
+thread 'network::tests::the_creative_generator_stores_and_gives_without_limit' (2434605) panicked at src/network.rs:3815:5:
+assertion `left == right` failed: the creative generator's stored and capacity are the largest number, as upstream's Integer.MAX_VALUE is
+  left: 0
+ right: 4294967295
+thread 'network::tests::the_creative_generator_wire_rig_delivers_a_thousand_fe_a_tick' (2434606) panicked at src/network.rs:3889:5:
+assertion `left == right` failed: the twenty ticks after the window filled deliver exactly 1,000 FE each: 20,000 in all
+  left: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+ right: [1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000]
+thread 'network::tests::the_creative_generator_offers_every_neighbour_everything' (2434604) panicked at src/network.rs:3856:5:
+assertion `left == right` failed: upstream offers Integer.MAX_VALUE and the neighbour's own insert caps it, so asking for less would cap a large sink
+  left: 0
+ right: 4294967295
+test result: FAILED. 77 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Green: **80 passed, 0 failed** (`sdk-test.log`, regenerated for 0.2.7) — the four new tests are the
+unlimited supply (`extract` gives what is asked, `insert` takes nothing), the connector's settled
+`pull` from every face and the give-never-take declaration, the `u32::MAX` offer, and the wire rig
+in the rules (first tick primes the double buffer and delivers nothing, the next twenty deliver
+1,000 each — 20,000). `src/runtime.rs` is untouched (`03721ca4…f962`, packed too).
+
+### The 0.2.7 ladder
+
+| Step | Command | Result |
+|---|---|---|
+| tests | `cargo test --offline` | **80 passed**, 0 failed (`sdk-test.log`, regenerated for 0.2.7) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| formatting | `cargo fmt --check` | clean (`sdk-fmt.log`; `src/runtime.rs` unchanged, `03721ca4…f962`) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` | `target/horizon-mod/createaddition.hmod`, exit 0 (`creative-build-1.log`) |
+| package, second build | same again | **byte-identical** (`cmp`, `creative-build-2.log` vs `creative-build-3.log`) |
+| registry check | `cargo horizon-mod check createaddition.hmod` | exit 0 (`creative-check.log`) |
+| fits, campaign pin | `cargo horizon-mod fits … --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a` | `0a875da  made for`, exit 0 (`creative-fits-pin.log`) |
+| fits, another build | `… --build 0b14f8acfd97fa2c750e42795249dcc981178ca4` | **`does not fit: 1 item changed — the method BlockStates::light_emission (removed)`**, exit 1 (`creative-fits-other.log`) — 0.2.5's finding, unchanged |
+| data shape | `python3 tools/data_shape.py createaddition.hmod` | 6/6 loot tables in the 26.3 dialect |
+| content carry | `python3 tools/carry_content.py --check` | `assets/ and data/ match the jar carry` |
+| licence notice | `python3 tools/check_licence.py` | `ok … carries the upstream MIT notice verbatim` |
+| package verifier | `python3 ports/tools/verify-sdk-package.py createaddition` | **1/1** (`verify-sdk-package.log`) |
+
+The second `fits` run is red for 0.2.5's reason, not this slice's: the lamp's `light_emission`
+surface does not exist at `0b14f8a`, so no earlier build can carry the package. The creative
+generator itself needs no new surface.
+
+Deliverable: **`createaddition.hmod`, 178,357 B, SHA-256
+`8387f865ed975963a9b7bd5b1d1d602434977c43a288dc0399e4cdbf962ad9b6`**, **117 entries**, reproducible
+(three builds, two `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too). 86 `assets/` and 20 `data/` files (106 carried + generated; was 79 +
+18).
+
+```
+createaddition 0.2.7 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  178357 bytes, SHA-256 8387f865ed975963a9b7bd5b1d1d602434977c43a288dc0399e4cdbf962ad9b6, unsigned
+```
+
+```
+Create Crafts & Additions:
+0a875da  made for
+Create Crafts & Additions:
+0b14f8a  does not fit: 1 item changed
+    the method `BlockStates::light_emission` (removed)
+```
+
+The launcher rebuilt the game for this package (`native-0a875da-a4f96b049501`) and printed
+`Compiling createaddition (1 of 1)`: the manifest bump is again what forces the recompile.
+
+### In-game (`e2e-creative-default.log`, `PASS` + `EXIT:0`; `== L`)
+
+The rig is `generator(170) – connector(171, facing west, settles pull) – wire – connector(175,
+push) – accumulator(176)` on its own stone pad, and the direct pair `generator(166) –
+accumulator(167)` beside it; the player stands within reach for every read.
+
+```
+== L: the creative generator gives without limit; a wire carries 1,000 FE a tick ==
+  Connector at 171,100,0: mode pull, buffer 1000/1000 FE, links [], pool 0/0, demand 0, t=2606
+  the connector's own state reads createaddition:connector[facing=west,mode=pull]
+  Creative Generator at 170,100,0: infinite FE (t=2616)
+  Modular Accumulator at 176,100,0: 0/2000000 FE (t=2625)
+  mode 175 push: Mode set to push.
+  link 171-175 (gold): Nodes linked.
+  Modular Accumulator at 176,100,0: 13040/2000000 FE (t=2658)
+  Modular Accumulator at 176,100,0: 43040/2000000 FE (t=2688)
+  the connector pulls from the generator and the sink gained 30000 FE over 30 game ticks (exactly 1000/tick; 20000 FE in the 20-tick window)
+  -- the differential: stone where the generator was, the same wire, moves nothing
+  Modular Accumulator at 176,100,0: 0/2000000 FE (t=2731)
+  Modular Accumulator at 176,100,0: 0/2000000 FE (t=2762)
+  stone in the generator's place: the sink stayed at 0 FE over 31 game ticks
+  -- the generator's own tick: an accumulator beside it fills with no connector at all
+  Modular Accumulator at 167,100,0: 50000/2000000 FE (t=2796)
+  Modular Accumulator at 167,100,0: 190000/2000000 FE (t=2824)
+  the direct pair: the accumulator gained 140000 FE over 28 game ticks at 5,000/tick, no connector involved
+```
+
+Why these can fail: the sink's gain is asserted to be **exactly** `1,000 × (t_after − t_before)`
+(not "some energy"), so a source that gave 2,000 or 0 a tick fails; the 20,000 is the minimum over
+the 20-tick wait. The stone differential changes **only** the source block — the wire, the push
+connector and the sink are the same — so anything that moved the sink without the generator would
+fail there. The direct pair separates the two mechanisms: with no connector, the accumulator can
+only gain from the generator's own tick, and it gains exactly 5,000 a tick (its insert cap), which
+a package without the per-tick push cannot do.
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-creative-default.log` | `PASS` + `EXIT:0` | A–K unchanged (the relay still carries 25,020 FE conserved, the lamp 1 FE/t, the comparator 0/8/15), plus **L**: the generator's id and `infinite FE` readout, a connector settles `pull` (state and readout), exactly 1,000 FE/t into the sink over 30 ticks, stone in its place moves nothing, and a generator beside an accumulator fills it at 5,000/t with no connector; **H** now breaks all six blocks |
+| `e2e-creative-selftest.log` | `FAIL` + `EXIT:1` | `FAIL: CREATIVE_SELFTEST: the creative generator supplied 31000 FE, so the assertion is alive` (L's own counterfactual) |
+| `e2e-creative-suite-selftest.log` | `FAIL` + `EXIT:1` | the suite's conservation counterfactual, still alive (`SELFTEST: the conservation assertion did not trip`) |
+| `e2e-creative-control.log` | `FAIL` + `EXIT:1` | a game without the package cannot give the accumulator item (`ctl give` exits 1), and the default run's control leg also refuses `createaddition:creative_energy` by id (`the control's setblock left minecraft:air where the creative generator would be`) |
+
+`python3 ports/tools/check-e2e-logs.py createaddition createaddition-e2e --strict`:
+**logs=29 ok=29 missing-exit=0 bad-exit=0** (the 25 earlier legs still green).
+
+### Coverage added by this slice
+
+| family | status |
+|---|---|
+| the unlimited `ENERGY` supply (stored/capacity, gives any ask, takes nothing) | **tested** — `the_creative_generator_stores_and_gives_without_limit`; in game `Creative Generator at 170,100,0: infinite FE` and the wire's fill |
+| a connector on the generator settles `pull` | **tested** — `a_connector_mounted_on_the_creative_generator_settles_pulling` (every face); in game `connector[facing=west,mode=pull]` and `mode pull` |
+| the per-tick offer to every neighbour | **tested** — `the_creative_generator_offers_every_neighbour_everything`; in game the direct pair gains exactly 5,000 a tick |
+| a wire from the generator at 1,000 FE/t | **tested** — `the_creative_generator_wire_rig_delivers_a_thousand_fe_a_tick` (20,000 over 20 ticks); in game `30000 FE over 30 game ticks` |
+| the differential: no generator, no gain | **tested** — in game stone in its place leaves the sink at 0 over 31 ticks |
+| the generator's loot table | **tested** — H (`createaddition:creative_energy: broke and dropped 1`) |
+| the block state, model and item | **tested** — placed and read back (`ctl block`), given as an item, drops itself; the two textures are generated and packed |
+| the generator's recipe | **not ported** — it needs `c:ingots/brass`/`create:` items (`CONTENT.md`) |
+| the Create crate's own look (Create's textures) | **not carried** — generated stand-ins (deviation 12) |
+
+### Deviations of this slice (declared)
+
+1. **The supply is a registered handler, not a saved charge** (also `FINDINGS.md` 10). There is no
+   `block_energy` for the block and `/createaddition energy` refuses it; the readout says
+   `infinite FE`.
+2. **The six neighbours are re-read every pass** (`FINDINGS.md` 11): upstream caches
+   `BlockCapabilityCache`s and refreshes them on `neighborChanged`; a package's pass already walks
+   the tick queue, so there is no cache to invalidate.
+3. **Two generated textures** (`FINDINGS.md` 12): the jar's model names Create's crate and tank
+   art, which is not in this artefact. The two 16×16 PNGs are drawn by `carry_content.py`, so
+   `--check` reproduces them and no other mod's assets ship.
+4. **The push runs in the level pass, not in the block entity's own tick.** A block entity is out
+   of the world during its tick at this pin, so the queue is the only route; the pass runs it after
+   the towers form (an adjacent accumulator answers the pool) and before the wire networks move.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review

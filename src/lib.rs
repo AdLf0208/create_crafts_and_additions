@@ -26,7 +26,8 @@ use mod_api::{
 };
 
 use crate::network::{
-  AccumulatorShape, ConnectorShape, Kind, LightShape, Pending, Queue, RelayShape, Signals, Ticker,
+  AccumulatorShape, ConnectorShape, Kind, LightShape, Pending, Queue, RelayShape, Signals,
+  Supports, Ticker,
 };
 
 /// The mod's session state: which of its block entities ticked this tick, per level, and the
@@ -36,6 +37,7 @@ struct Mod {
   queue: Arc<Mutex<Queue>>,
   signals: Arc<Mutex<Signals>>,
   pending: Arc<Mutex<Pending>>,
+  supports: Arc<Mutex<Supports>>,
 }
 
 #[mod_api::horizon_mod]
@@ -69,13 +71,27 @@ impl Hooks for Mod {
 
     // Every wire block's Part shares one pending-selection store: the first spool click selects a
     // node, the second lays the wire, and a spool's selection is the player's (`network::Pending`),
-    // not the stack's — the SDK cannot rewrite a held stack in place.
-    registrar.block_part(small, ConnectorShape::new(Arc::clone(&self.pending)));
-    registrar.block_part(large, ConnectorShape::new(Arc::clone(&self.pending)));
-    registrar.block_part(relay, RelayShape::new(Arc::clone(&self.pending)));
+    // not the stack's — the SDK cannot rewrite a held stack in place. The same Parts share one
+    // support queue: a neighbour change under a placed connector may have taken its support, and
+    // the removal waits for this level's pass, where the exact face-sturdy query can run.
+    registrar.block_part(
+      small,
+      ConnectorShape::new(Arc::clone(&self.pending), Arc::clone(&self.supports)),
+    );
+    registrar.block_part(
+      large,
+      ConnectorShape::new(Arc::clone(&self.pending), Arc::clone(&self.supports)),
+    );
+    registrar.block_part(
+      relay,
+      RelayShape::new(Arc::clone(&self.pending), Arc::clone(&self.supports)),
+    );
     // The lamp is a connector with its own Part: the same placement and spool click, plus the
     // `light_emission` answer its `dynamic_light` declaration asks for.
-    registrar.block_part(light, LightShape::new(Arc::clone(&self.pending)));
+    registrar.block_part(
+      light,
+      LightShape::new(Arc::clone(&self.pending), Arc::clone(&self.supports)),
+    );
     // The accumulator answers a comparator: `has_analog_output` says it may be asked and
     // `analog_output` gives the tower's fill, which the level pass computes and records.
     registrar.block_part(
@@ -122,7 +138,7 @@ impl Hooks for Mod {
       .lock()
       .expect("the createaddition tick queue lock is held for one drain")
       .take(event.level);
-    network::level_ticked(host, event.level, &queued, &self.signals);
+    network::level_ticked(host, event.level, &queued, &self.signals, &self.supports);
   }
 
   /// `/createaddition info|energy|link|unlink|mode|signals`: the harness's readout and the controls
@@ -159,6 +175,12 @@ impl Hooks for Mod {
       .queue
       .lock()
       .expect("the createaddition tick queue lock is held for one level unload")
+      .forget_dimension(event.dimension);
+    // A support check queued for that level can never run now.
+    let _ = self
+      .supports
+      .lock()
+      .expect("the createaddition support queue lock is held for one level unload")
       .forget_dimension(event.dimension);
     // A spool's first click is a click in progress: no half-made link survives the level it was
     // made in. The store is per player, so a close ends every player's (declared in `notes.md`).

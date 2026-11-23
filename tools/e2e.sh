@@ -938,6 +938,10 @@ RIG_C2=$((RIG_X + 2))
 RIG_B=$((RIG_X + 3))
 ctl command "execute in minecraft:the_end run fill $((RIG_A - 1)) 100 -2 $((RIG_B + 1)) 100 2 minecraft:stone" >/dev/null
 ctl command "execute in minecraft:the_end run fill $((RIG_A - 1)) 101 -2 $((RIG_B + 1)) 104 2 minecraft:air" >/dev/null
+# A flat relay stands on the block below it (`RedstoneRelayBlock.canSurvive`), and the pad's floor
+# is at y=100, so the relay's own cell (y=100) has air under it. Give it the stone its rule asks
+# for; without it the relay is an orphan and the port removes it on the first neighbour change.
+ctl command "execute in minecraft:the_end run setblock $RIG_X 99 0 minecraft:stone" >/dev/null
 ctl wait 6 >/dev/null
 place_accumulator "$RIG_A"
 place_accumulator "$RIG_B"

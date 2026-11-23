@@ -1,4 +1,89 @@
-# Validation — Create Crafts & Additions slices 1–12
+# Validation — Create Crafts & Additions slices 1–13
+
+## 0.2.12 — the support rule and the level's own removal drop
+
+Pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (nightly 2026-11-20), mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`; every cargo/package step inside one
+`ports/tools/build-slot.sh` lease (`CARGO_INCREMENTAL=0`, no `--target-dir`), with `BUILD_LOCAL=1`
+for the package and e2e steps (`cargo horizon-mod` and the launcher-built game are on this box). In-game legs: the launcher-built game
+`native-0a875da-e88f42afab54` (launcher 0.2.92).
+
+The slice, in one line: a wire block whose support is broken is removed by the level, with its own
+loot and four wires per wire it held, and its peer lets go (`AbstractConnectorBlock` /
+`RedstoneRelayBlock.neighborChanged`). The rules, the config default that decides what an *orphan*
+is, and why `can_survive` cannot carry the rule at this pin: `notes.md` § *Slice 13*.
+
+```
+red, pre-slice support rule        106 passed, 2 failed  (support-red.log)
+  a connector's support face       left: (Down, Up)      right: (North, South)
+  a vertical relay's support       left: (Down, Up)      right: (West, East)
+cargo test --offline               108 passed, 0 failed             (sdk-test.log, regenerated)
+cargo clippy --all-targets --offline -- -D warnings   exit 0, 0 warnings (sdk-clippy.log)
+cargo fmt --check                  clean (empty)                   (sdk-fmt.log)
+rm -f Cargo.lock && cargo horizon-mod build            exit 0       (support-build-1.log)
+the same again (rm -f Cargo.lock)                      byte-identical (cmp) (support-build-2.log)
+cargo horizon-mod check createaddition.hmod            0.2.12 … 197327 bytes (support-check.log)
+fits --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a  "is made for exactly one build (it has a
+                                                       [native.mixin] table), so fits doesn't
+                                                       apply", exit 2   (support-fits-pin.log)
+fits --build 0b14f8acfd97fa2c750e42795249dcc981178ca4  the same refusal, exit 2
+                                                                    (support-fits-other.log)
+launcher-game.sh build createaddition   `Compiling createaddition (1 of 1)`, tag
+                                        `native-0a875da-e88f42afab54` (support-launcher-build.log);
+                                        the launcher's own log: `Compiling createaddition: 4128 ms`
+                                        and `Function replacement: 2 functions patched by 2 mixins,
+                                        without rebuilding the game (copy 70 ms, horizon-mixins
+                                        102 ms, compile 1187 ms, total 1360 ms)`
+                                        (support-launcher-patch.log); identity
+                                        `{"id":"createaddition","version":"0.2.12",…}` and
+                                        `libcreateaddition.so` identity
+                                        `0a875da91dbb… createaddition 0.2.12 1.99.1`
+                                        (its `44f14914…` binary is the one the in-game legs ran —
+                                        the README's version line moved the pack hash once, so the
+                                        launcher was run again and the docs-only rebuild changed
+                                        no compiled code)
+python3 tools/data_shape.py createaddition.hmod          6/6 in the 26.3 dialect
+python3 tools/carry_content.py --check                   assets/ and data/ match the jar carry
+python3 tools/check_licence.py                           upstream notice verbatim
+python3 ports/tools/check-recipe-types.py createaddition   createaddition: ok
+python3 ports/tools/verify-sdk-package.py createaddition   1/1     (verify-sdk-package.log,
+                                                                   incl. `package matches the tree`)
+python3 ports/tools/check-e2e-logs.py createaddition-e2e --strict   logs=56 ok=56 missing-exit=0
+                                                                   bad-exit=0
+```
+
+**Both `fits` lines are refusals, not a pass and a red** — unchanged since 0.2.9. The replacement
+evidence is the launcher build (the mod recompiled and both mixins were re-applied against
+`0a875da`) and the game it produced, which ran the support leg, the A–M suite, the drop leg, the
+lifecycle leg and the renderer leg.
+
+Deliverable: `createaddition.hmod`, **197,327 B**, SHA-256
+`63062d5fdcd07e7a573b3910727be91444332f42b9bd1b9e05daef0b25d82e4e`, **127 entries**, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too).
+
+```
+createaddition 0.2.12 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  197327 bytes, SHA-256 63062d5fdcd07e7a573b3910727be91444332f42b9bd1b9e05daef0b25d82e4e, unsigned
+```
+
+```
+Create Crafts & Additions is made for exactly one build (it has a [native.mixin] table), so `fits` doesn't apply.
+```
+
+### In-game — the support leg, the A–M suite, the drop, the lifecycle and the renderer
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-support-default.log` | `PASS` + `EXIT:0` | a linked pair on glass supports: breaking the far connector's glass removes it, `drops` is exactly `{connector:1, copper_wire:4}`, the peer reads `links []`; the identical rig whose support stays (poked so the check runs) keeps its connector and link |
+| `e2e-support-selftest.log` | `FAIL` + `EXIT:1` | `SUPPORT_SELFTEST: the orphan reads 'minecraft:air' — the level removed it, so the default leg's removal assertion is alive` |
+| `e2e-support-control.log` | `FAIL` + `EXIT:1` | a Nightly without the package cannot place `createaddition:connector`, so the removal comes from this package |
+| `e2e-support-suite.log` | `PASS` + `EXIT:0` | A–M on 0.2.12: every earlier family unchanged (the relay's conserved bridge, the lamp's 1 FE/t, the comparator's 0/8/15, the generator's 1,000 FE/t, the festive wire's 1,000 FE/t, the break drops) |
+| `e2e-support-suite-selftest.log` | `FAIL` + `EXIT:1` | the suite's conservation counterfactual is still alive |
+| `e2e-support-wire.log` | `PASS` + `EXIT:0` | the renderer is not regressed: **1901** green-dominant pixels with the wire, mean `rgb(21, 86, 9)`, 0 without it |
+| `e2e-support-wire-negative.log` | `FAIL` + `EXIT:1` | the renderer's own counterfactual |
+| `e2e-drop-default-0.2.12.log` | `PASS` + `EXIT:0` | 0.2.10's break-drop leg still green: the floated rigs survive the new trigger and a broken connector still drops its wires |
+| `e2e-lifecycle-default-0.2.12.log` | `PASS` + `EXIT:0` | the pass's new first step disturbs none of the lifecycle clears (a removal, a chunk unload, a save, a relaunch) |
 
 ## 0.2.11 — the lifecycle clears (review fix: stale comparator entries)
 

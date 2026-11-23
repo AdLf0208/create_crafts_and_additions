@@ -2806,3 +2806,257 @@ have left the answer — and exits 1 (`FAIL: LIFECYCLE_SELFTEST: the chunk unloa
    (read-only) and its reply is tagged like every other.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review
+
+---
+
+## Slice 13 — the support rule and the level's own removal drop (0.2.12)
+
+### The slice, and the gap line it comes from
+
+0.2.10's coverage table carried the family as missing:
+
+> **the break-drop of a connector removed by the level (support gone, piston, water)** | **not
+> ported** — the port has no `canSurvive` for its connectors, so the level never removes one;
+> upstream's `neighborChanged` path is unreachable here
+
+**Choice.** A connector whose support went away was an orphan: it kept floating, kept its wire in
+its peer's list, and the level never took it out. Upstream removes it in `neighborChanged` —
+`playerWillDestroy`'s removal is the *player's* path (0.2.10), this is the **level's**. It is the
+last server half of the wire family and it reuses both the drop tables 0.2.10 added.
+
+**Tier fit.** `deep`: one support rule on the three wire Parts plus the pass that applies it, and
+the two existing drop tables (`break_stacks`/`wire_drop`). No renderer, no entity, no new block,
+no new content.
+
+### The rule, read from the artefact before implementing (not guessed)
+
+Repo `658a390b8ff4daa17013e9447b29949330c8a42a` (analysis only; the port is a clean-room rewrite):
+
+| file | what it says |
+|---|---|
+| `blocks/connector/base/AbstractConnectorBlock.java:149-163` | `neighborChanged`: `if (!state.canSurvive(worldIn, pos)) { dropResources(state, worldIn, pos, blockEntity); if (blockEntity instanceof IWireNode) ((IWireNode) blockEntity).dropWires(worldIn, true); worldIn.removeBlock(pos, false); updateNeighborsAt ×6; }` — the level's removal drops the block's loot **and** the wires, even for a creative player (`dropWires(level, true)`) |
+| `…AbstractConnectorBlock.java:156-163` | `canSurvive`: the support is `pos.relative(facing)` and the face asked is `facing.getOpposite()` (`isFaceSturdy(..., SupportType.CENTER)`), **or** `CommonConfig.CONNECTOR_IGNORE_FACE_CHECK` |
+| `config/CommonConfig.java:197-198` | that flag's default is **`true`** — upstream's connectors may float by default; the *relay* has no such flag |
+| `blocks/redstone_relay/RedstoneRelayBlock.java:122-145` | the relay's `neighborChanged` removes the same way (`dropResources` + `removeBlock`), and its `canSurvive` is `canSupportCenter(vertical ? pos.relative(direction) : pos.below(), vertical ? direction.getOpposite() : Direction.UP)` — a flat relay stands on the block **below**, a vertical one behind its `facing` |
+
+So the rule is: **a wire block whose support face is not sturdy is removed by the level, with its
+own loot and four wires per wire it held.** The support is the face behind a connector's (or a
+vertical relay's) `facing`, or the block below a flat relay.
+
+**The default flag, handled, not ignored.** A connector placed with nothing behind it is
+upstream's default (`connector_ignore_face_check = true`) and this port keeps that half: a floated
+connector is not judged an orphan. What is fixed is the orphan — a block that **had** a support
+and lost it. The trigger is the neighbour change (`neighborChanged`), so a block that never had a
+support is never the subject of a removal it did not earn; the existing A–M rigs (which float
+connectors and a relay in a few places) stay exactly as they were.
+
+### The route at the pin
+
+`BlockPart::can_survive` (`IBlockExtension.canSurvive`, contract *replace*) **cannot** carry this
+rule, and neither can `update_shape`, though both exist:
+
+- `can_survive` is asked of a block **whose template checks survival** (a plant, a torch, a sign)
+  or at placement (`BlockItem.canPlace`); the engine never asks it for a block whose template is
+  `iron_block` (our connector's) on a shape update, so a `Some(false)` there would never run.
+- Both hooks receive a **level reader** (`&dyn LevelHost` / `&mut dyn LevelTicksHost`), which has
+  no face-sturdy query; `LevelRef::block_face_sturdy` needs the game host. The rule would be a
+  guess without it.
+
+The exact route, the one `ARCHITECTURE`/`hook-feasibility.md` prescribe for a neighbour-triggered
+write, is:
+
+| point | hook | what it gives |
+|---|---|---|
+| the trigger | **`BlockPart::neighbor_changed`** (`Block.neighborChanged`) | a notice for our own states only, with `dimension`/`pos`; no writes, so it queues the position |
+| the decision | **`level_tick_post`** (this port's one pass) | the game host and a `LevelRef`: `LevelRef::block_property` (the `facing`/`vertical` bits) and `LevelRef::block_face_sturdy(pos, face, SupportType::Center)` — upstream's own query |
+| the drop | `LevelRef::destroy_block(host, pos, true, None, false)` | `Level.destroyBlock`: the block's own loot table, "the one level drop path … loot, block-drop hooks and experience once" |
+| the wires | the 0.2.10 tables | `break_wires(…, false)` drops four per wire and empties the peer without a second drop |
+
+`SupportType::Center` is the constant upstream passes, not `Full`: a connector mounts on a slab
+as a torch does. An answer the level will not give (an unloaded support) is taken as **supported**
+(a block that might still be supported is not an orphan).
+
+### What it does
+
+- **`support_of(kind, facing, vertical)`** (`src/network.rs`, pure and unit-tested): the two rules
+  above, as the `(direction to the support, face asked on it)` pair. Connectors, the large
+  connector and the lamp use the `facing` face; a flat relay uses the block below; a vertical relay
+  uses its `facing`. It is the first rule of this campaign's support checks that is *not* per-block
+  duplicated: one function, every wire kind.
+- **`Supports`** (the trigger queue): positions a neighbour change reached, per dimension, drained
+  in that level's pass. It is emptied every tick it is drained, so a position cannot outlive its
+  level; `level_unload` forgets a closing level's (the same discipline the lifecycle slice's clears
+  established).
+- **`neighbor_changed` on the three wire Parts** queues the position. It runs for our blocks only,
+  so no other block's neighbour changes reach it.
+- **The pass removes before it moves energy.** `level_ticked` drains the queue first, and a block
+  whose support is gone is taken out *before* the network walk reads its links; the removed
+  positions are filtered out of the pass's block list, so a destroyed connector is never a stale
+  member.
+- **The drop is the player's drop.** `break_wires(…, false)` (always drop: upstream's level path
+  passes `true`, not `!isCreative`) plus `destroy_block`'s loot. `drops` in game is exactly the
+  connector and the four wires.
+- **No new hook, no new content.** `neighbor_changed`, `block_property`, `block_face_sturdy` and
+  `destroy_block` are all at the pin; the `[[native.mixin]]` render rows are unchanged.
+
+### Red → green (TDD)
+
+The rules went in first as the pre-slice behaviour — `support_of` answering the flat-relay rule for
+every block — with three tests written against the jar's own geometry. `support-red.log`, verbatim:
+
+```
+---- network::tests::a_connector_is_mounted_on_the_face_behind_its_facing stdout ----
+thread 'network::tests::a_connector_is_mounted_on_the_face_behind_its_facing' (500860) panicked at src/network.rs:4891:7:
+assertion `left == right` failed: Small on a north-facing connection stands on the block north of it
+  left: (Down, Up)
+ right: (North, South)
+---- network::tests::a_flat_relay_stands_on_the_block_below_and_a_vertical_one_behind_its_facing stdout ----
+thread 'network::tests::a_flat_relay_stands_on_the_block_below_and_a_vertical_one_behind_its_facing' (500867) panicked at src/network.rs:4924:5:
+assertion `left == right` failed: a vertical relay hangs on the block behind its facing
+  left: (Down, Up)
+ right: (West, East)
+
+test result: FAILED. 106 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Green: **108 passed, 0 failed** (`sdk-test.log`, regenerated for 0.2.12; 105 → 108, the three new
+tests). The three: a connector's (and large connector's, and lamp's) support is the face behind its
+`facing` for three directions, a flat relay's is the block below whatever way it lies and a
+vertical relay's is the block behind its `facing` (a ceiling included), and only the four wire
+kinds are support-checked while the accumulator and the generator are not. `src/runtime.rs` stays
+byte-identical (`03721ca4…f962`, packed too).
+
+### The 0.2.12 ladder
+
+| Step | Command | Result |
+|---|---|---|
+| red | `cargo test --offline` against the pre-slice rule | **106 passed, 2 failed**, exit 101 (`support-red.log`) |
+| tests | the same | **108 passed**, 0 failed (`sdk-test.log`, regenerated) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| formatting | `cargo fmt --check` | clean (`sdk-fmt.log`, empty) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` | exit 0 (`support-build-1.log`) |
+| package, second build | `rm -f Cargo.lock` + the same again | **byte-identical** (`cmp`) (`support-build-2.log`) |
+| registry check | `cargo horizon-mod check createaddition.hmod` | exit 0, `0.2.12 … 197327 bytes` (`support-check.log`) |
+| fits, campaign pin | `cargo horizon-mod fits … --build 0a875da…` | **`is made for exactly one build (it has a [native.mixin] table), so fits doesn't apply`**, exit 2 (`support-fits-pin.log`) |
+| fits, another build | `… --build 0b14f8a…` | the same refusal, exit 2 (`support-fits-other.log`) |
+| launcher build | `launcher-game.sh build createaddition` | `Compiling createaddition (1 of 1)`, tag `native-0a875da-e88f42afab54` (`support-launcher-build.log`), and the launcher's own log: `Compiling createaddition: 4128 ms`, `Function replacement: 2 functions patched by 2 mixins, without rebuilding the game (copy 70 ms, horizon-mixins 102 ms, compile 1187 ms, total 1360 ms)` (`support-launcher-patch.log`); the README's version line moved the content hash once, so the launcher was run again from the final tree and its `libcreateaddition.so` is `44f14914…` — the same binary the in-game legs below ran, so a docs-only rebuild did not change the compiled code |
+| launcher identity | `native-mods.json` of the built version | `{"id":"createaddition","version":"0.2.12",…}`, `libcreateaddition.so` identity `0a875da91dbb… createaddition 0.2.12 1.99.1`; `strings libcreateaddition.so` carries the new code (5 hits for `support_gone`/`createaddition:copper_wire`) |
+| data shape | `python3 tools/data_shape.py createaddition.hmod` | 6/6 files in the 26.3 dialect |
+| content carry | `python3 tools/carry_content.py --check` | `assets/ and data/ match the jar carry` |
+| licence notice | `python3 tools/check_licence.py` | `ok … carries the upstream MIT notice verbatim` |
+| recipe types | `python3 ports/tools/check-recipe-types.py createaddition` | `createaddition: ok` |
+| package verifier | `python3 ports/tools/verify-sdk-package.py createaddition` | **1/1** — including `package matches the tree` (`verify-sdk-package.log`) |
+| e2e checker | `python3 ports/tools/check-e2e-logs.py createaddition-e2e --strict` | **logs=56 ok=56 missing-exit=0 bad-exit=0** |
+
+**Both `fits` lines are the route's refusals, not a regression** (unchanged since 0.2.9: a package
+with a `[[native.mixin]]` row is made for exactly one build). The compatibility evidence is the
+launcher build and the game it produced, which ran the support leg, the whole A–M suite, the drop
+leg, the lifecycle leg and the renderer leg.
+
+Deliverable: **`createaddition.hmod`, 197,327 B, SHA-256
+`63062d5fdcd07e7a573b3910727be91444332f42b9bd1b9e05daef0b25d82e4e`**, **127 entries**,
+reproducible (two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too). The content is untouched (`assets/`/`data/` the same 114 files), so
+the entry count is 0.2.11's.
+
+```
+createaddition 0.2.12 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  197327 bytes, SHA-256 63062d5fdcd07e7a573b3910727be91444332f42b9bd1b9e05daef0b25d82e4e, unsigned
+```
+
+```
+Create Crafts & Additions is made for exactly one build (it has a [native.mixin] table), so `fits` doesn't apply.
+```
+
+### In-game (`e2e-support-default.log`, `PASS` + `EXIT:0`)
+
+A dedicated leg (`tools/e2e-support.sh`, after 0.2.10's `e2e-drop.sh`): no earlier leg breaks a
+*connector's support*. The rig is a pair of connectors four blocks apart, each mounted
+`facing=down` on a **glass** block one below it, with one copper wire between them. Glass is a full
+block (it holds the connectors) and drops nothing, so the break's own `drops` map carries our items
+only. The leg breaks the far connector's glass in survival and reads `ctl break`'s reply:
+
+```
+== an orphan: the far connector stands on glass at 304,101, break that glass ==
+  peer at 300: Connector at 300,102,0: mode none, buffer 0/1000 FE, links [(304,102,0)/0/copper], pool 0/0, demand 0, t=133
+  the wire is saved on the peer
+  304,101: {"drops":{"createaddition:connector":1,"createaddition:copper_wire":4},"picked_up":{},"ticks":9}
+  peer at 300: Connector at 300,102,0: mode none, buffer 0/1000 FE, links [], pool 0/0, demand 0, t=201
+== differential: the same rig at 316, its support stays ==
+  peer at 312: Connector at 312,102,0: mode none, buffer 0/1000 FE, links [(316,102,0)/0/copper], pool 0/0, demand 0, t=271
+  the kept rig still carries its wire
+PASS: a connector whose support is broken is removed by the level and drops the connector and four wires per wire it held, with its peer's link emptied; an identically placed connector on a support that stays keeps both
+```
+
+Why these can fail: `drops` is the exact map of item entities within three blocks of the broken
+glass, so a package that removes nothing leaves the connector in the world (and the `GONE` check
+fails), a package that removes it without the wires shows `{"createaddition:connector":1}`, and a
+wrong kind shows a different map; the peer readout is the block entity's own saved links, so a
+removal that forgets to clear the reciprocal node reads the edge. The **differential** is the
+mirror: the same rig whose glass stays, poked by a placed-and-removed stone above the far
+connector so its `neighbor_changed` really runs, is still there with its link — so "gone" cannot
+come from the support check removing everything. `SUPPORT_SELFTEST=1` inverts the removal (it
+asserts the orphan is still there), finds it gone, and exits 1.
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-support-default.log` | `PASS` + `EXIT:0` | the orphan pair starts linked; the far connector's glass is broken; the far connector is gone, `drops` is exactly `{connector:1, copper_wire:4}`, the peer reads `links []`; the identical rig whose support stays keeps its connector and its link after the same poke |
+| `e2e-support-selftest.log` | `FAIL` + `EXIT:1` | `SUPPORT_SELFTEST: the orphan reads 'minecraft:air' — the level removed it, so the default leg's removal assertion is alive` |
+| `e2e-support-control.log` | `FAIL` + `EXIT:1` | a Nightly without the package does not know `createaddition:connector` (the setblock left `minecraft:air`), so the removal this leg reads comes from this package |
+| `e2e-support-suite.log` | `PASS` + `EXIT:0` | the whole A–M suite on 0.2.12: every earlier family unchanged (the relay's conserved bridge, the lamp's 1 FE/t, the comparator's 0/8/15, the generator's 1,000 FE/t, the festive wire's 1,000 FE/t, the break drops, the doctored tower) |
+| `e2e-support-suite-selftest.log` | `FAIL` + `EXIT:1` | the suite's conservation counterfactual is still alive |
+| `e2e-support-wire.log` | `PASS` + `EXIT:0` | the renderer is not regressed: **1901** green-dominant pixels with the wire (mean `rgb(21, 86, 9)`), 0 without it |
+| `e2e-support-wire-negative.log` | `FAIL` + `EXIT:1` | the renderer's own counterfactual (a renderer that draws nothing fails the leg) |
+| `e2e-drop-default-0.2.12.log` | `PASS` + `EXIT:0` | 0.2.10's break-drop leg still green on this package: the floated rigs survive the new trigger (a floating connector is the default's, not an orphan), and a broken connector still drops its wires |
+| `e2e-lifecycle-default-0.2.12.log` | `PASS` + `EXIT:0` | the pass's new first step disturbs none of the lifecycle clears: a removal, a chunk unload, a save and a relaunch read exactly as 0.2.11 |
+
+Harness facts this slice cost: (1) the support queue drains in the same tick it is filled, so no
+extra state survives a pass; (2) the rig must place the **support before** the connector, because
+a connector placed in air is the default's floating connector and is deliberately not removed; (3)
+glass is the clean support for this assertion — a full block (so `SupportType::Center` holds it)
+whose break drops nothing, keeping the `drops` map to our items; (4) the A–M suite's phase I
+relay sat *in* the floor row (`y=100`) with air below it, which upstream's flat-relay rule would
+reject, so the rig now places the one stone its support asks for (`y=99`) — no other leg needed a
+change.
+
+### Coverage (this slice's families)
+
+| family | status |
+|---|---|
+| a connector whose support is broken is removed by the level | **tested** — `a_connector_is_mounted_on_the_face_behind_its_facing`, the in-game orphan (`GONE` = `minecraft:air`) |
+| …and drops what a player's break drops: the connector and four wires per wire | **tested** — the in-game `drops` map is exactly `{connector:1, copper_wire:4}` (0.2.10's tables reused) |
+| …and its peer lets go of it | **tested** in game — the peer reads `links []` |
+| a flat relay stands on the block below, a vertical one behind its `facing` | **tested** — `a_flat_relay_stands_on_the_block_below_and_a_vertical_one_behind_its_facing` |
+| a connector on a support that stays is kept (the differential) | **tested** in game — the poked kept rig is still there with its link |
+| only the four wire blocks are support-checked | **tested** — `only_the_blocks_that_mount_on_a_face_are_support_checked` |
+| a floating connector (never had a support) is kept, upstream's default | **declared deviation** — the existing A–M/drop rigs depend on it and it is `connector_ignore_face_check`'s default; see deviations 1–2 |
+| the removal by a **piston** or by **water** | **same route** — both are level-side changes that deliver `neighbor_changed` to a wire block, so the same pass removes one whose support they took; the leg breaks the support with a player because that is the one a `ctl` command can do directly |
+| `can_survive` as the answer (the brief's proposed hook) | **not possible at this pin** — the hook gets a level reader with no face-sturdy query and the engine only asks it for a block whose template checks survival; see deviations 3 |
+
+### Deviations of this slice (declared)
+
+1. **A connector that never had a support is kept.** Upstream's `connector_ignore_face_check`
+   defaults to `true`, so a floated connector is the default behaviour, and the port keeps it. The
+   fix is the *orphan*: a block that had a support and lost it. The trigger is the neighbour change
+   (`neighborChanged`'s own point), so a block is only ever judged when something next to it
+   changed.
+2. **The relay rig in the A–M suite gained one stone.** Phase I placed a flat relay in the floor
+   row with air under it; upstream's relay rule (no config flag) rejects that, so the rig now lays
+   the block the relay stands on. No assertion in the suite changed.
+3. **`can_survive` is not the answer, `neighbor_changed` + the pass is.** `can_survive` is asked at
+   placement and by templates that check survival; the connector's template (`iron_block`) does
+   neither, so an answer there would never run on a support loss. Both it and `update_shape` get a
+   level reader with no `isFaceSturdy`; `LevelRef::block_face_sturdy` (the exact query) needs the
+   game host, which only the pass has. This is the route `hook-feasibility.md` records for every
+   neighbour-triggered write.
+4. **One tick, not the same call.** Upstream removes inside `neighborChanged`; here the removal runs
+   at `level_tick_post` of the same server tick. A read between the two would see the orphan for a
+   fraction of a tick; no vanilla path reads a block in that window.
+5. **A support the level will not answer for is treated as present.** An unloaded support returns
+   `None`; the port keeps the block (a block that might still be supported is not an orphan) and the
+   next neighbour change re-asks.
+6. **The creative case is not special-cased.** Upstream's level path passes `dropWires(level, true)`,
+   so a creative player's world loses the wires too; the port always drops in this path (the
+   creative rule belongs to the *player's* break, 0.2.10).
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review

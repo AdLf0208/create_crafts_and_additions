@@ -106,10 +106,17 @@ An accumulator's comparator answer is kept only as long as the accumulator is: t
 (`on_block_state_change`), its chunk's unload (`chunk_unload`) and its level's close (`level_unload`)
 each forget it, and a spool's first click is dropped when its level closes or its player leaves.
 
+A wire block whose support is broken is removed by the level the way upstream's `neighborChanged`
+removes it: the supports are the face behind a connector's (or a vertical relay's) `facing` and the
+block below a flat relay, the check runs in the level pass (`block_face_sturdy`, `SupportType.Center`),
+and the removal drops the block's own loot plus four wires per wire it held, clearing the peer's
+link. A connector placed with no support is upstream's `connector_ignore_face_check` default and is
+not treated as an orphan; only a support that goes away takes its block.
+
 ## Layout
 
 ```
-horizon-mod.toml               the only manifest and identity: id, version 0.2.11, api 0.2, [native]
+horizon-mod.toml               the only manifest and identity: id, version 0.2.12, api 0.2, [native]
 Cargo.toml                     one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/rustfmt.toml               tab_spaces = 2, the campaign's style (a root one is refused)
 src/lib.rs                     the one impl Hooks: register, level_tick_post, the three lifecycle clears, commands

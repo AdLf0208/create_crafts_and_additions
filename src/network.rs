@@ -19,12 +19,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use mod_api::{
-  self, AnalogOutputEvent, BlockEntityPart, BlockEntityTickEvent, BlockEntityTicksEvent, BlockKey,
-  BlockPart, Command, CommandArgumentValue, CommandInvocation, Compound, Direction, ENERGY,
-  HasAnalogOutputEvent, Host, HostBlockStates, HostTransaction, InteractionResult, ItemKey,
-  ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef, LevelSide, LightEmissionEvent,
-  ModEnergyBuffer, NeighbourUpdate, OnBlockStateChangeEvent, OnDestroyedByPlayerEvent, ServerHost,
-  StateConstraint, StateForPlacementEvent, Tag, Text, UseItemOnEvent, move_energy,
+  self, AnalogOutputEvent, BlockEntityPart, BlockEntityTickEvent, BlockEntityTicksEvent, BlockFace,
+  BlockKey, BlockPart, Command, CommandArgumentValue, CommandInvocation, Compound, Direction,
+  ENERGY, HasAnalogOutputEvent, Host, HostBlockStates, HostTransaction, InteractionResult, ItemKey,
+  ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef, LevelSide, LevelTicksHost,
+  LightEmissionEvent, ModEnergyBuffer, NeighborChangedEvent, NeighbourUpdate,
+  OnBlockStateChangeEvent, OnDestroyedByPlayerEvent, ServerHost, StateConstraint,
+  StateForPlacementEvent, SupportType, Tag, Text, UseItemOnEvent, move_energy,
 };
 
 use crate::render::{self, WireKind};
@@ -594,6 +595,34 @@ fn face_name(face: Direction) -> &'static str {
   }
 }
 
+/// The face a [`Direction`] names as a support-query face.
+fn block_face(side: Direction) -> BlockFace {
+  match side {
+    Direction::Down => BlockFace::Down,
+    Direction::Up => BlockFace::Up,
+    Direction::North => BlockFace::North,
+    Direction::South => BlockFace::South,
+    Direction::West => BlockFace::West,
+    Direction::East => BlockFace::East,
+  }
+}
+
+/// Where a wire block's support stands, and the face of that support block that must be sturdy.
+///
+/// Upstream mounts the two connectors and the lamp on the block **behind** their `facing`
+/// (`AbstractConnectorBlock.canSurvive`: the support is `pos.relative(facing)` and the face asked
+/// on it is `facing.getOpposite()`, the one pointing back at the connector). A relay is a block
+/// that may lie flat: `RedstoneRelayBlock.canSurvive` stands a flat relay on the block **below**
+/// (`pos.below()`, its `up` face) and a vertical one on the block behind its `facing`. The
+/// accumulator and the generator are not wire blocks and never reach this rule.
+fn support_of(kind: Kind, facing: Direction, vertical: bool) -> (Direction, BlockFace) {
+  if kind == Kind::Relay && !vertical {
+    (Direction::Down, BlockFace::Up)
+  } else {
+    (facing, block_face(facing.opposite()))
+  }
+}
+
 /// The horizontal direction 90° clockwise of `face`, as `Direction.getClockWise` has it
 /// (north → east → south → west).
 fn clockwise(face: Direction) -> Direction {
@@ -890,6 +919,39 @@ impl Queue {
   }
 }
 
+/// The wire blocks a neighbour change reached this tick, per dimension, drained in that level's
+/// pass. A support may have gone under a connector (or a flat relay), and only the level pass
+/// holds the game host the exact face-sturdy query needs — `update_shape`/`can_survive` are given
+/// a read-only level reader, and the engine never asks a block whose template does not check
+/// survival (`iron_block`) at all. Keyed by the dimension's name because the neighbour hook is
+/// told a `LevelDimension`, not a `LevelRef`; the set is emptied every tick it is drained, so a
+/// position can never outlive its level.
+#[derive(Default)]
+pub(crate) struct Supports {
+  pending: HashMap<String, BTreeSet<Pos>>,
+}
+
+impl Supports {
+  /// Queue `pos` for `dimension`'s next pass.
+  fn push(&mut self, dimension: &str, pos: Pos) {
+    self
+      .pending
+      .entry(dimension.to_owned())
+      .or_default()
+      .insert(pos);
+  }
+
+  /// Everything queued for `dimension`, in position order; empty afterwards.
+  pub(crate) fn take(&mut self, dimension: &str) -> BTreeSet<Pos> {
+    self.pending.remove(dimension).unwrap_or_default()
+  }
+
+  /// Forget `dimension`'s queued positions: its level closed before its pass could run.
+  pub(crate) fn forget_dimension(&mut self, dimension: &str) -> usize {
+    self.pending.remove(dimension).map_or(0, |at| at.len())
+  }
+}
+
 /// The one block entity type of the four blocks: it makes them tick, and its tick only queues
 /// the position for the level's pass.
 pub(crate) struct Ticker {
@@ -929,11 +991,12 @@ impl BlockEntityPart for Ticker {
 /// The part both connectors carry: where a placed one is mounted, and what a spool does with it.
 pub(crate) struct ConnectorShape {
   pending: Arc<Mutex<Pending>>,
+  supports: Arc<Mutex<Supports>>,
 }
 
 impl ConnectorShape {
-  pub(crate) fn new(pending: Arc<Mutex<Pending>>) -> Self {
-    Self { pending }
+  pub(crate) fn new(pending: Arc<Mutex<Pending>>, supports: Arc<Mutex<Supports>>) -> Self {
+    Self { pending, supports }
   }
 }
 
@@ -972,17 +1035,33 @@ impl BlockPart for ConnectorShape {
     broken_by_player(host, event);
     None
   }
+
+  /// A neighbour changed under a placed connector: its support may have gone
+  /// (`AbstractConnectorBlock.neighborChanged`). The exact face-sturdy query needs the game host,
+  /// so the position is queued for this level's pass; a block that is only floated (never had a
+  /// support) is upstream's `connector_ignore_face_check` default and stays.
+  fn neighbor_changed(&self, _level: &mut dyn LevelTicksHost, event: &mut NeighborChangedEvent) {
+    self
+      .supports
+      .lock()
+      .expect("the createaddition support queue lock is held for one insert")
+      .push(
+        event.dimension.key().id(),
+        [event.pos.x, event.pos.y, event.pos.z],
+      );
+  }
 }
 
 /// The relay's Part: where a placed one sits, and what a spool does with it. A relay takes
 /// wires exactly as a connector does; only its two ports differ, and the link chooses one.
 pub(crate) struct RelayShape {
   pending: Arc<Mutex<Pending>>,
+  supports: Arc<Mutex<Supports>>,
 }
 
 impl RelayShape {
-  pub(crate) fn new(pending: Arc<Mutex<Pending>>) -> Self {
-    Self { pending }
+  pub(crate) fn new(pending: Arc<Mutex<Pending>>, supports: Arc<Mutex<Supports>>) -> Self {
+    Self { pending, supports }
   }
 }
 #[mod_api::horizon_part]
@@ -1028,6 +1107,21 @@ impl BlockPart for RelayShape {
     broken_by_player(host, event);
     None
   }
+
+  /// A neighbour changed under a placed relay: its support may have gone
+  /// (`RedstoneRelayBlock.neighborChanged`). A flat relay stands on the block below, a vertical
+  /// one on the block behind its `facing`; the pass asks that face, because the exact query needs
+  /// the game host.
+  fn neighbor_changed(&self, _level: &mut dyn LevelTicksHost, event: &mut NeighborChangedEvent) {
+    self
+      .supports
+      .lock()
+      .expect("the createaddition support queue lock is held for one insert")
+      .push(
+        event.dimension.key().id(),
+        [event.pos.x, event.pos.y, event.pos.z],
+      );
+  }
 }
 
 /// The lamp's Part: a connector's placement and spool click, plus the light its `powered` bit
@@ -1035,11 +1129,12 @@ impl BlockPart for RelayShape {
 /// (`IBlockExtension.getLightEmission`) instead of taking the block's static `light`.
 pub(crate) struct LightShape {
   pending: Arc<Mutex<Pending>>,
+  supports: Arc<Mutex<Supports>>,
 }
 
 impl LightShape {
-  pub(crate) fn new(pending: Arc<Mutex<Pending>>) -> Self {
-    Self { pending }
+  pub(crate) fn new(pending: Arc<Mutex<Pending>>, supports: Arc<Mutex<Supports>>) -> Self {
+    Self { pending, supports }
   }
 }
 
@@ -1073,6 +1168,20 @@ impl BlockPart for LightShape {
   ) -> Option<bool> {
     broken_by_player(host, event);
     None
+  }
+
+  /// A neighbour changed under a placed lamp: its support may have gone, as the small connector's
+  /// (`SmallLightConnectorBlock extends AbstractConnectorBlock`). The pass asks the face behind
+  /// its `facing`, because the exact query needs the game host.
+  fn neighbor_changed(&self, _level: &mut dyn LevelTicksHost, event: &mut NeighborChangedEvent) {
+    self
+      .supports
+      .lock()
+      .expect("the createaddition support queue lock is held for one insert")
+      .push(
+        event.dimension.key().id(),
+        [event.pos.x, event.pos.y, event.pos.z],
+      );
   }
 
   /// The lamp glows at full light while its `powered` bit is set (upstream's
@@ -1549,6 +1658,36 @@ fn broken_by_player(host: &mut dyn ServerHost, event: &OnDestroyedByPlayerEvent<
   break_wires(host, level, keys, event.pos, creative);
 }
 
+/// Whether a wire block's support has gone: the block behind a connector's (or a vertical
+/// relay's) `facing`, or below a flat relay, no longer holds that face (`isFaceSturdy` with
+/// `SupportType.CENTER`, the rule upstream's two `canSurvive`s ask). A block that is not one of
+/// our wire blocks is never removed, and a support the level will not answer for (an unloaded
+/// position) is kept: a block that might still be supported is not an orphan.
+fn support_gone(host: &dyn Host, level: LevelRef, keys: Keys, pos: Pos) -> bool {
+  let Some(kind) = level.block(host, pos).and_then(|block| keys.kind(block)) else {
+    return false;
+  };
+  if kind.wire_node().is_none() {
+    return false;
+  }
+  let Some(facing) = level
+    .block_property(host, pos, FACING)
+    .as_deref()
+    .and_then(face_named)
+  else {
+    return false;
+  };
+  let vertical = level
+    .block_property(host, pos, VERTICAL)
+    .as_deref()
+    .is_some_and(|value| value == "true");
+  let (side, face) = support_of(kind, facing, vertical);
+  let support = offset(pos, side);
+  !level
+    .block_face_sturdy(host, support, face, SupportType::Center)
+    .unwrap_or(true)
+}
+
 /// The empty spool takes every wire out of the clicked connector, on both ends.
 ///
 /// A wire is removed only where **both** ends are loaded and record each other: the peer's
@@ -1679,15 +1818,37 @@ pub(crate) fn level_ticked(
   level: LevelRef,
   queued: &BTreeSet<Pos>,
   signals: &Mutex<Signals>,
+  supports: &Mutex<Supports>,
 ) {
-  if queued.is_empty() {
-    return;
-  }
   let Some(keys) = Keys::resolve(host) else {
     return;
   };
+  // A neighbour change under one of our wire blocks queued it: its support may have gone, and this
+  // is the one place the exact face-sturdy query can run (`LevelRef::block_face_sturdy` needs the
+  // game host). A support that has gone takes the connector with its wires — the level's own
+  // removal, which upstream's `neighborChanged` does — and the block's own loot follows through
+  // `destroy_block`, so the drop is the same one a player's break makes.
+  let changed = supports
+    .lock()
+    .expect("the createaddition support queue lock is held for one drain")
+    .take(host.dimension());
+  let mut removed: BTreeSet<Pos> = BTreeSet::new();
+  for pos in changed {
+    if !support_gone(host, level, keys, pos) {
+      continue;
+    }
+    // The wires first, while the block entity is still there to read; the level's own drop path
+    // then takes the block itself (`destroy_block` with its loot, no tool needed by its table).
+    break_wires(host, level, keys, pos, false);
+    let _ = level.destroy_block(host, pos, true, None, false);
+    removed.insert(pos);
+  }
+  if queued.is_empty() {
+    return;
+  }
   let blocks: Vec<(Pos, Saved)> = queued
     .iter()
+    .filter(|pos| !removed.contains(*pos))
     .filter_map(|&pos| Some((pos, saved_at(host, level, keys, pos)?)))
     .collect();
   if blocks.is_empty() {
@@ -4852,5 +5013,76 @@ mod tests {
       break_stacks(&[kind_wire([1, 0, 0], 0, Laying::Copper)], true),
       vec![(Laying::Copper, 4)]
     );
+  }
+
+  // --- the support rule -----------------------------------------------------
+
+  #[test]
+  fn a_connector_is_mounted_on_the_face_behind_its_facing() {
+    // `AbstractConnectorBlock.canSurvive`: the support is `pos.relative(facing)` and the face
+    // asked on it is `facing.getOpposite()`, the one pointing back at the connector. The large
+    // connector and the lamp inherit the connector rule unchanged.
+    for kind in [Kind::Small, Kind::Large, Kind::Light] {
+      assert_eq!(
+        support_of(kind, Direction::North, false),
+        (Direction::North, BlockFace::South),
+        "{kind:?} on a north-facing connection stands on the block north of it"
+      );
+      assert_eq!(
+        support_of(kind, Direction::Down, false),
+        (Direction::Down, BlockFace::Up),
+        "{kind:?} on a floor stands on the block below it"
+      );
+      assert_eq!(
+        support_of(kind, Direction::East, false),
+        (Direction::East, BlockFace::West),
+        "{kind:?} is mounted on the west face of the block east of it"
+      );
+    }
+  }
+
+  #[test]
+  fn a_flat_relay_stands_on_the_block_below_and_a_vertical_one_behind_its_facing() {
+    // `RedstoneRelayBlock.canSurvive`: `canSupportCenter(vertical ? pos.relative(direction) :
+    // pos.below(), vertical ? direction.getOpposite() : Direction.UP)`. The `vertical` bit, not
+    // the facing, chooses the support; a flat relay's facing is horizontal and irrelevant.
+    assert_eq!(
+      support_of(Kind::Relay, Direction::East, false),
+      (Direction::Down, BlockFace::Up),
+      "a flat relay stands on the block below it whatever way it lies"
+    );
+    assert_eq!(
+      support_of(Kind::Relay, Direction::North, false),
+      (Direction::Down, BlockFace::Up),
+      "the flat rule is the same for a north-facing relay"
+    );
+    assert_eq!(
+      support_of(Kind::Relay, Direction::West, true),
+      (Direction::West, BlockFace::East),
+      "a vertical relay hangs on the block behind its facing"
+    );
+    assert_eq!(
+      support_of(Kind::Relay, Direction::Up, true),
+      (Direction::Up, BlockFace::Down),
+      "a vertical relay on a ceiling hangs on the block above it"
+    );
+  }
+
+  #[test]
+  fn only_the_blocks_that_mount_on_a_face_are_support_checked() {
+    // A connector, a large connector, a relay and the lamp stand on something; the accumulator
+    // and the creative generator do not, and upstream gives neither a `canSurvive`.
+    for kind in [Kind::Small, Kind::Large, Kind::Relay, Kind::Light] {
+      assert!(
+        kind.wire_node().is_some(),
+        "{kind:?} is a wire block and needs a support"
+      );
+    }
+    for kind in [Kind::Accumulator, Kind::Creative] {
+      assert!(
+        kind.wire_node().is_none(),
+        "{kind:?} is not a wire block and is never support-checked"
+      );
+    }
   }
 }

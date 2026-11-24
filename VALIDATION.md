@@ -1,4 +1,76 @@
-# Validation — Create Crafts & Additions slices 1–13
+# Validation — Create Crafts & Additions slices 1–14
+
+## 0.2.13 — the accumulator's gauge readout (the client half)
+
+Pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (nightly 2026-11-20), mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`; every cargo/package step inside one
+`ports/tools/build-slot.sh` lease (`CARGO_INCREMENTAL=0`, no `--target-dir`), with `BUILD_LOCAL=1`
+for the package and e2e steps (`cargo horizon-mod` and the launcher-built game are on this box).
+In-game legs: the launcher-built game tag `native-0a875da-8e290337a94e` (launcher 0.2.92,
+identity `createaddition 0.2.13 1.99.1`).
+
+The slice, in one line: the jar's gauge needle — `rotateXDegrees(-180 * fill)` on all four
+horizontal faces — drawn by the same wgpu pipeline as the 0.2.9 wire renderer, with the fill
+published by the level pass. The route, the measured UV and the red are in `notes.md` § *Slice 14*.
+
+```
+red, pre-slice gauge stubs       108 passed, 5 failed  (gauge-red.log)
+  the needle angle                half full turns the needle ninety degrees: 0
+  the clamped fill                left: 0.0  right: 0.5
+  the needle vertices             an empty gauge still draws its needle
+  the four-face draw              left: 0  right: 24
+  the gauge cache                 left: 0  right: 1
+cargo test --offline              113 passed, 0 failed             (sdk-test.log, regenerated)
+cargo clippy --all-targets --offline -- -D warnings  exit 0, 0 warnings (sdk-clippy.log)
+cargo fmt --check                 clean                            (sdk-fmt.log)
+rm -f Cargo.lock && cargo horizon-mod build            exit 0       (gauge-build-1.log)
+the same again (rm -f Cargo.lock)                      byte-identical (cmp; gauge-build-2.log)
+cargo horizon-mod check createaddition.hmod            0.2.13 … 201208 bytes (gauge-check.log)
+fits --build 0a875da91dbb0fdcb7ba8c42c11341aa229af51a  "is made for exactly one build (it has a
+                                                        [native.mixin] table), so fits doesn't
+                                                        apply", exit 2   (gauge-fits-pin.log)
+fits --build 0b14f8acfd97fa2c750e42795249dcc981178ca4  the same refusal, exit 2
+                                                                     (gauge-fits-other.log)
+launcher-game.sh build createaddition  `Compiling createaddition (1 of 1)`, tag
+                                      `native-0a875da-8e290337a94e` (gauge-launcher-build.log);
+                                      the launcher's log: `Function replacement: 2 functions patched
+                                      by 2 mixins, without rebuilding the game (copy 61 ms,
+                                      horizon-mixins 302 ms, compile 11 ms, total 376 ms)`
+                                      (gauge-launcher-patch.log);
+                                      identity `createaddition 0.2.13 1.99.1`
+                                      (gauge-launcher-identity.json)
+python3 ports/tools/verify-sdk-package.py createaddition  1/1     (verify-sdk-package.log,
+                                                                  incl. `package matches the tree`)
+python3 ports/tools/check-e2e-logs.py createaddition-e2e --strict  logs=61 ok=61 missing-exit=0
+                                                                  bad-exit=0
+```
+
+**Both `fits` lines are refusals, not a pass and a red** — unchanged since 0.2.9. The replacement
+evidence is the launcher build (the mod recompiled and both mixins were re-applied against
+`0a875da`) and the game it produced, which ran the gauge leg, the wire leg and the A–M suite.
+
+Deliverable: `createaddition.hmod`, **201,084 B**, SHA-256
+`c6cbc620b6602c5023dac07ce4a362bc94bbf103699c632d2a65d6c78a878955`, **127 entries**, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too).
+
+```
+createaddition 0.2.13 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  201208 bytes, SHA-256 c6cbc620b6602c5023dac07ce4a362bc94bbf103699c632d2a65d6c78a878955, unsigned
+```
+
+### In-game — the gauge differential, the wire and the A–M suite
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-gauge-default.log` | `PASS` + `EXIT:0` | empty gauge: **136** cyan needle pixels, mean rgb(123, 213, 214), upper/lower **88/48**; full gauge: **167**, mean rgb(124, 212, 213), upper/lower **7/160** — the needle swings across the box's middle row; both PNGs dumped |
+| `e2e-gauge-negative.log` | `FAIL` + `EXIT:1` | the accumulator is removed, so there is no gauge and the default leg's positive assertion fails; this leg also found the stale-cache bug (now fixed) |
+| `e2e-gauge-control.log` | `FAIL` + `EXIT:1` | a Nightly without the package cannot place `createaddition:modular_accumulator`, so the cyan pixels come from this package |
+| `e2e-gauge-wire.log` | `PASS` + `EXIT:0` | the 0.2.9 renderer still draws **1901** green-dominant wire pixels (mean rgb(21, 86, 9)), 0 after unlink — sharing the pipeline did not regress it |
+| `e2e-gauge-suite.log` | `PASS` + `EXIT:0` | the whole A–M suite on 0.2.13: every earlier family unchanged |
+
+`probe-gauge.log` records the jar's gauge UV, the `dial.json` pivot and the renderer's `-180 × fill`
+bytecode; `probe-gauge-screen.log` records a five-fill sweep of the needle's pixel numbers.
 
 ## 0.2.12 — the support rule and the level's own removal drop
 

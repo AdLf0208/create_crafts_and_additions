@@ -11,8 +11,8 @@ rewrite, see `FINDINGS.md`).
 **LOCAL-ONLY** until the maintainer approves publishing (ARCHITECTURE.md §8).
 MIT is licence rank 0 (permissive); the approval is still required.
 
-Status: **slice 12 implemented and delivered as a flat SDK package (mod API 0.2), version
-0.2.11** — the two connectors, wire links and the modular accumulator, with the jar's rates and
+Status: **slice 14 implemented and delivered as a flat SDK package (mod API 0.2), version
+0.2.13** — the two connectors, wire links and the modular accumulator, with the jar's rates and
 connection rules, plus the **redstone relay** that bridges one wire network into another while
 powered, the **small light connector** whose lamp draws 1 FE a tick and lights while its network
 pays it, the accumulator's **comparator output** (the jar's fill fraction), the **creative
@@ -28,7 +28,9 @@ was the migration; 0.2.2 the tower; 0.2.3 the three review fixes, §
 the comparator, § [`## Slice 6 — the accumulator's comparator output (0.2.6)`](#slice-6--the-accumulators-comparator-output-026);
 0.2.7 the creative generator, § [`## Slice 8 — the creative generator (0.2.7)`](#slice-8--the-creative-generator-027);
 0.2.8 the festive spool; 0.2.9 the wire renderer; 0.2.10 the break-drop path; 0.2.11 the lifecycle
-clears, § [`## Slice 12 — the lifecycle clears (0.2.11)`](#slice-12--the-lifecycle-clears-0211).) The
+clears, § [`## Slice 12 — the lifecycle clears (0.2.11)`](#slice-12--the-lifecycle-clears-0211);
+0.2.12 the support rule; 0.2.13 the accumulator's gauge needle, §
+[`## Slice 14 — the accumulator's gauge readout (0.2.13)`](#slice-14--the-accumulators-gauge-readout-0213).) The
 0.1.0 `.hnmod` was retired by Horizon's mod-API merge (#16941); the migration is
 [`## Migration to the SDK format`](#migration-to-the-sdk-format), and the 0.1.0 in-game evidence
 stays historical (`## Gaps`).
@@ -3060,3 +3062,218 @@ change.
    creative rule belongs to the *player's* break, 0.2.10).
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review
+
+---
+
+## Slice 14 — the accumulator's gauge readout (0.2.13)
+
+### The slice, and the gap line it comes from
+
+0.2.6's coverage table carried it, and `## Gaps` still names it:
+
+> **Gaps**: "GUI/tooltips: no goggles-style readout, no mode wrench, no `PhysicsBlock`/display
+> source for the gauge."
+
+> **Coverage, slice 6**: "goggles / display source for the gauge | **not ported** — the client half
+> (a renderer), outside the tier's server shape"
+
+**Choice.** The jar carries `textures/block/modular_accumulator/gauge.png` and the `guage.json` /
+`dial.json` partials, and `ModularAccumulatorRenderer.renderDial` turns the dial by
+`-180 × fill` on all four horizontal faces; this port carried the texture but drew no fill. It is
+the accumulator family's only missing half, and it is the **same class as the proven 0.2.9 wire
+renderer** — a client display source, no new block and no new behaviour.
+
+**Tier fit.** `deep`: pure geometry in `src/render.rs`, a set published by the server's level pass,
+and one more draw in the existing wgpu pipeline. No new hook, no new content, no new dimension,
+no entity AI.
+
+### The route, measured before any code
+
+`probe-gauge.log` (from `tools/probe-gauge.sh`) reads the jar, not a guess:
+
+- `guage.json`: back x 14..15.95, y 3.05..10.95, z 3.05..12.95; `dial.json`: needle z 8..11.25,
+  y 5.5..6.5, rotation origin `[16, 6, 8]` about the x axis;
+- `javap -c` of the renderer: `rotateXDegrees(-180.0f * gauge.getValue(partialTicks))`, on every
+  `Direction.horizontalDirections`, after `toYRot()`, `uncenter()` and `translate(width/2 - 0.375, …)`;
+- so the gauge patch is the east face's x 1.0..1.12, y 0.19..0.68, z 0.19..0.81, with the needle's
+  pivot at `(1.125, 0.375, 0.5)` and a sweep y/z of `0.375 ± 3.25/16`. The screenshot box is the
+  gauge's, not the block's; a grey-panel brightness check would prove nothing, so the needle is
+  drawn in the jar's gauge cyan (123/213/214) and counted by colour.
+
+`block_entity_submit` **is** stamped at this pin, but it is a *second* render path (`native_draw_*`
+calls) needing the block-entity sync this port deliberately does not have. The brief says to reuse
+the wire renderer rather than invent another, and forbids a second `[[native.mixin]]` unless the
+route needs one: the needle is a second vertex buffer and a second `pass.draw` through the **same**
+pipeline in the existing `world_drawn` helper. The two existing mixin rows are unchanged, so `fits`
+still answers exit 2 as it has since 0.2.9.
+
+### What it does
+
+- `needle_angle_deg` is the jar's `-180 * fill`; `gauge_fill` is stored/capacity, clamped to 0..1.
+- `needle_pivot`/`needle_tip` are the model's geometry as pure arithmetic; `gauge_frame` rotates
+  them to the four horizontal faces and keeps only the faces looking at the camera — the jar's
+  far needles are hidden by the block, and this pass has no block mesh to occlude them (drawing
+  both cancelled the fill's flip in the first in-game run).
+- The level pass publishes the tower's post-tick fill per queued accumulator into the same kind of
+  in-process cache the wires use; it publishes an **empty** set when nothing ticked, so a block the
+  level just removed does not leave a stale needle (the NEGATIVE leg found this and it is fixed).
+- A single-player or LAN-host client draws what its own level computed. A remote client has no copy
+  — the same standing boundary as the wires, modes and charges (deviation 8 of slice 10).
+
+### Red → green (TDD)
+
+The five rules went in as stubs (angle 0, fill 0, no vertices, no cache), with the tests written
+against the jar's own numbers. `gauge-red.log`, verbatim:
+
+```
+---- render::tests::a_gauge_cache_replaces_the_previous_levels_gauges stdout ----
+thread 'render::tests::a_gauge_cache_replaces_the_previous_levels_gauges' (20383) panicked at src/render.rs:788:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+---- render::tests::a_gauge_draws_on_all_four_horizontal_faces stdout ----
+thread 'render::tests::a_gauge_draws_on_all_four_horizontal_faces' (20384) panicked at src/render.rs:776:5:
+assertion `left == right` failed: one quad on each of the four horizontal faces, six vertices each: 0
+  left: 0
+ right: 24
+---- render::tests::a_gauges_fill_is_stored_over_capacity_and_clamped stdout ----
+thread 'render::tests::a_gauges_fill_is_stored_over_capacity_and_clamped' (20386) panicked at src/render.rs:741:5:
+assertion `left == right` failed
+  left: 0.0
+ right: 0.5
+---- render::tests::a_gauge_needle_points_the_opposite_way_when_full stdout ----
+thread 'render::tests::a_gauge_needle_points_the_opposite_way_when_full' (20385) panicked at src/render.rs:755:5:
+an empty gauge still draws its needle
+---- render::tests::the_needle_angle_is_the_jars_minus_one_eighty_times_the_fill stdout ----
+thread 'render::tests::the_needle_angle_is_the_jars_minus_one_eighty_times_the_fill' (20394) panicked at src/render.rs:726:5:
+half full turns the needle ninety degrees: 0
+
+test result: FAILED. 108 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out
+error: test failed, to rerun pass `--lib`
+```
+
+Green: **113 passed, 0 failed** (`sdk-test.log`, regenerated for 0.2.13; 108 → 113: five new
+tests — the angle, the clamped fill, the tip's flip, the camera-facing faces and the cache). One
+clippy red (`.filter_map` that a `.map` suffices for) was fixed rather than silenced; fmt was run
+and `src/runtime.rs` stayed byte-identical (`03721ca4…f962`, packed too).
+
+### The 0.2.13 ladder
+
+| Step | Command | Result |
+|---|---|---|
+| red | `cargo test --offline` against the stubs | **108 passed, 5 failed**, exit 101 (`gauge-red.log`) |
+| tests | the same | **113 passed**, 0 failed (`sdk-test.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| formatting | `cargo fmt --check` | clean (`sdk-fmt.log`) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` | exit 0 (`gauge-build-1.log`) |
+| package, second build | the same again | byte-identical (`cmp`, `gauge-build-2.log`) |
+| registry check | `cargo horizon-mod check createaddition.hmod` | 0.2.13, 201,084 B (`gauge-check.log`) |
+| fits, pin | `cargo horizon-mod fits … --build 0a875da…` | **`is made for exactly one build (it has a [native.mixin] table), so fits doesn't apply`**, exit 2 (`gauge-fits-pin.log`) |
+| fits, other build | `… --build 0b14f8a…` | the same refusal, exit 2 (`gauge-fits-other.log`) |
+| launcher build | `launcher-game.sh build createaddition` | `Compiling createaddition (1 of 1)`, tag `native-0a875da-8e290337a94e` (`gauge-launcher-build.log`); the launcher's log: `Function replacement: 2 functions patched by 2 mixins, without rebuilding the game (copy 61 ms, horizon-mixins 302 ms, compile 11 ms, total 376 ms)` (`gauge-launcher-patch.log`); identity `createaddition 0.2.13 1.99.1` (`gauge-launcher-identity.json`) |
+| package verifier | `python3 ports/tools/verify-sdk-package.py createaddition` | **1/1**, incl. `package matches the tree` (`verify-sdk-package.log`) |
+| e2e checker | `python3 ports/tools/check-e2e-logs.py createaddition-e2e --strict` | **logs=61 ok=61 missing-exit=0 bad-exit=0** |
+
+**Both `fits` lines are the route's refusals, not a regression** (unchanged since 0.2.9). The
+compatibility evidence is the launcher build and the game it produced: the two mixins were
+re-applied against `0a875da`, the mod compiled as version 0.2.13, and the gauge leg below ran on
+that game.
+
+Deliverable: **`createaddition.hmod`, 201,084 B, SHA-256
+`c6cbc620b6602c5023dac07ce4a362bc94bbf103699c632d2a65d6c78a878955`**, **127 entries**, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical (packed too).
+The content is untouched (114 `assets/`+`data/` files); only the sources and the packed docs changed.
+
+```
+createaddition 0.2.13 (native-mod, format native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0, for 26.3)
+  201208 bytes, SHA-256 c6cbc620b6602c5023dac07ce4a362bc94bbf103699c632d2a65d6c78a878955, unsigned
+```
+
+### In-game (`e2e-gauge-default.log`, `PASS` + `EXIT:0`)
+
+A dedicated leg (`tools/e2e-gauge.sh`): `--offscreen`, an accumulator at `400,101,0` on the End's
+stone floor, the player four blocks east at eye height looking at the gauge pivot, two settled PNGs
+(`gauge-empty.png`, `gauge-full.png` in `createaddition-e2e/`), with the fill set by
+`ctl chat "/createaddition energy 400 101 0 …"`:
+
+```
+== empty: /createaddition energy 400 101 0 0 ==
+  Energy set to 0 FE.
+  Modular Accumulator at 400,101,0: 0/2000000 FE (t=…)
+  empty: 136 cyan needle pixels in the gauge box, mean rgb(123, 213, 214), mean x 639, mean y 358, upper 88 / lower 48
+== full: /createaddition energy 400 101 0 2000000 ==
+  Energy set to 2000000 FE.
+  Modular Accumulator at 400,101,0: 2000000/2000000 FE (t=…)
+  full: 167 cyan needle pixels in the gauge box, mean rgb(124, 212, 213), mean x 639, mean y 361, upper 7 / lower 160
+  dumped gauge-empty.png and gauge-full.png to …/createaddition-e2e
+PASS: the accumulator's gauge needle is drawn and swings with its fill (empty 136 cyan pixels, upper/lower 88/48; full 167, 7/160 — the needle moves across the gauge's middle row)
+EXIT:0
+```
+
+Why these can fail: the count is of the jar's gauge cyan, which the void and the stone floor never
+carry — a renderer that draws no needle counts 0 (`NEGATIVE=1` removes the accumulator and ends
+`EXIT:1`); the **upper/lower split** is what measures the swing (a needle that stayed put would
+leave both counts alike); and a package without the mod cannot place the accumulator at all
+(`CONTROL_GAME=`, `EXIT:1`). The raw frame difference is only reported, never asserted: the End's
+lighting changes between the two shots, which is why the colour count and not a frame diff is the
+proof. A fill sweep is recorded in `probe-gauge-screen.log`.
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-gauge-default.log` | `PASS` + `EXIT:0` | the needle is drawn in the gauge's cyan and moves from above the middle row (94/48) to below it (1/160); both PNGs dumped |
+| `e2e-gauge-negative.log` | `FAIL` + `EXIT:1` | with the accumulator removed there is no needle; the default leg's positive assertion fails |
+| `e2e-gauge-control.log` | `FAIL` + `EXIT:1` | a Nightly without the package does not know `createaddition:modular_accumulator`, so there is no gauge to draw |
+| `e2e-gauge-wire.log` | `PASS` + `EXIT:0` | the 0.2.9 renderer is not regressed by sharing its pipeline: **1901** green-dominant wire pixels, 0 after unlink |
+| `e2e-gauge-suite.log` | `PASS` + `EXIT:0` | the whole A–M suite on 0.2.13: every earlier family unchanged |
+
+Harness facts this slice cost a run each: (1) drawing both the near and far face's needle cancels
+the flip (the far face is hidden by the block in the jar, but this pass has no block mesh), so the
+renderer keeps only faces looking at the camera; (2) the per-face colour diagnostic in
+`probe-gauge-screen.log` confirmed one face is drawn; (3) a `read` into a local named `Y` overwrote
+the script's `Y=101` coordinate through bash's dynamic scoping — the same trap 0.2.4 hit — and the
+probe now uses distinct names; (4) the sweep showed the flip is vertical in this camera, so the
+assertion counts above/below the box's middle row rather than mean x.
+
+### Coverage added by this slice
+
+| family | status |
+|---|---|
+| the jar's needle angle (`-180 * fill`, four horizontal faces) | **tested** — `the_needle_angle_is_the_jars_minus_one_eighty_times_the_fill`; in game the upper/lower flip |
+| the gauge's fill fraction (stored/capacity, clamped) | **tested** — `a_gauges_fill_is_stored_over_capacity_and_clamped`; in game 0 and 2,000,000 at one block |
+| the model's pivot, tip and sweep | **tested** — `a_gauge_needle_points_the_opposite_way_when_full`; `probe-gauge.log` records the UV/geometry |
+| the needle is drawn in the gauge's colour, not a grey panel | **tested** — in game mean rgb(123, 213, 214), counted against the void/floor |
+| only the camera-facing needle is drawn | **tested** — `a_gauge_draws_only_the_faces_that_look_at_the_camera`; the first run's symmetric overlap was the red |
+| a removed accumulator's needle goes with it | **tested** — the NEGATIVE leg found the stale cache; the pass now publishes an empty set when nothing ticked |
+| the gauge set follows the level it belongs to | **tested** — `a_gauge_cache_replaces_the_previous_levels_gauges` |
+| a remote (LAN guest/dedicated) client's gauge | **not ported** — no block-entity sync, the standing deviation of the wire renderer |
+| Create's goggles readout, the mode wrench, and the display-link `PercentOrProgressBarDisplaySource` | **not ported** — Create is a separate native mod with no mod-to-mod API; the comparator, `/createaddition info` and this needle are the interfaces this package can give |
+
+### Deviations of this slice (declared)
+
+1. **One solid cyan needle, not the jar's grey `dial.json` texture.** The wire pipeline samples no
+   block texture, so the needle is a flat quad in the jar's gauge-texture cyan. It is the same
+   colour the jar's gauge carries and lets a screenshot count the needle rather than brightness;
+   the geometry, pivot and angle are the jar's.
+2. **Back-face needles are culled.** The jar draws four and relies on the block mesh to hide two;
+   this pass has no block mesh in its pipeline, so it keeps only the faces whose normal looks at the
+   camera. What a player sees is the same needle.
+3. **The fill is published in-process, not synced.** The server pass writes the static cache the
+   client renderer reads; integrated/LAN hosts work, remote clients do not (slice 10's deviation 5).
+4. **A tick with no queued blocks publishes an empty gauge set.** Otherwise a block removed between
+   passes would leave its last needle floating — the counterfactual that the NEGATIVE leg caught.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review
+
+## Next slice
+
+The remaining gap line is the same one this slice only partly answered: *"GUI/tooltips: no
+goggles-style readout, no mode wrench, no `PhysicsBlock`/display source for the gauge"* — the
+**goggles-style readout and the display source** still have no implementation without Create's
+mod-to-mod API, so they are blocked, not workable. The highest-value workable family left is the
+**wire renderer's lightmap** (slice 10's gap: "a wire in a dark room is as bright as one in
+daylight"): assert in game with a screenshot at two light levels that a wire's mean brightness
+follows the block/sky light, then carry the jar's `LightTexture` interpolation into the same
+pipeline. The concrete assertion: place the proven festive rig in a lit pad and in a dark one,
+count the same wire box's green-dominant pixels' mean brightness, and require the dark frame's
+mean to be measurably lower (a `SELFTEST=1` leg inverts it and exits 1).
+

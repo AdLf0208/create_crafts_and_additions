@@ -830,6 +830,31 @@ fn publish_wires(host: &mut dyn ServerHost, level: LevelRef, blocks: &[(Pos, Sav
   render::publish(level.dimension_id(), wires);
 }
 
+/// The accumulator gauges this level's client draws: the tower's fill after this tick's moves,
+/// one per queued accumulator block, as the jar's renderer reads the controller's fill fraction
+/// (`ModularAccumulatorRenderer.renderDial` → `gauge.getValue`). The same in-process boundary as
+/// the wires: an integrated server's client reads what its level computed, a dedicated server's
+/// client has no copy (declared in `notes.md`).
+fn publish_gauges(
+  host: &dyn Host,
+  level: LevelRef,
+  blocks: &[(Pos, Saved)],
+  towers: &BTreeMap<Pos, Tower>,
+) {
+  let gauges: Vec<render::Gauge> = blocks
+    .iter()
+    .filter(|(_, saved)| saved.kind == Kind::Accumulator)
+    .map(|(pos, _)| {
+      let tower = towers.get(pos).copied().unwrap_or(Tower::single(*pos));
+      render::Gauge {
+        pos: *pos,
+        fill: render::gauge_fill(tower_amount(host, level, tower), tower.capacity()),
+      }
+    })
+    .collect();
+  render::publish_gauges(level.dimension_id(), gauges);
+}
+
 /// The level the server ticks now: the one a block entity's tick runs in.
 fn level_in_place(host: &dyn ServerHost) -> Option<LevelRef> {
   host
@@ -1844,6 +1869,10 @@ pub(crate) fn level_ticked(
     removed.insert(pos);
   }
   if queued.is_empty() {
+    // Nothing ticked, so an accumulator the level just removed is not in this tick's block list.
+    // Publish an empty set rather than leaving its last needle in the client cache: the gauge is
+    // the removed block's, and must go with it (the same discipline as the comparator answers).
+    render::publish_gauges(level.dimension_id(), Vec::new());
     return;
   }
   let blocks: Vec<(Pos, Saved)> = queued
@@ -1916,8 +1945,9 @@ pub(crate) fn level_ticked(
   // the comparators beside it to read again.
   note_tower_signals(host, level, &blocks, &towers, signals);
   // The client half: the links this tick read, for the renderer. Last, so it carries this
-  // tick's links and no earlier ones.
+  // tick's links and no earlier ones. The gauges follow the same pass's fills, after the moves.
   publish_wires(host, level, &blocks);
+  publish_gauges(host, level, &blocks, &towers);
 }
 
 /// Record each accumulator's comparator answer for the hook and tell the comparators beside a

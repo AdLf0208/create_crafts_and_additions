@@ -146,6 +146,199 @@ pub fn centre(pos: [i32; 3]) -> [f64; 3] {
   ]
 }
 
+// --- the accumulator's gauge -------------------------------------------------
+//
+// The jar draws the accumulator's fill as a needle on the `gauge.png` face of every horizontal
+// side (`ModularAccumulatorRenderer.renderDial`, read from the audited jar in `probe-gauge.log`):
+// `rotateXDegrees(-180 * fill)` about the dial's pivot, measured from the model's `dial.json`.
+// This port's block models carry no gauge partial, so the fill was invisible. The needle is drawn
+// by the **same** pipeline as the wires — one more vertex buffer in the existing `world_drawn`
+// mixin — with a colour taken from the jar's gauge texture so a screenshot can count it instead
+// of measuring a grey panel's brightness.
+
+/// The needle's colour: the jar's `gauge.png` cyan (123, 213, 214), as a solid so a frame can
+/// count the needle rather than the grey dial it replaces.
+pub const GAUGE_RGBA: [f32; 4] = [123.0 / 255.0, 213.0 / 255.0, 214.0 / 255.0, 1.0];
+/// Half the needle's width: `dial.json`'s y 5.5..6.5 is 1/16 of a block tall.
+pub const NEEDLE_HALF: f64 = 0.5 / 16.0;
+/// The needle's length: `dial.json`'s z 8..11.25 from the pivot at z 8.
+pub const NEEDLE_LENGTH: f64 = 3.25 / 16.0;
+
+/// The jar's needle angle, `rotateXDegrees(-180 * fill)`.
+pub fn needle_angle_deg(fill: f32) -> f32 {
+  -180.0 * fill
+}
+
+/// The fill a gauge answers: stored over capacity, clamped to the jar's 0..1 sweep (a docked
+/// charge cannot turn the needle past full).
+pub fn gauge_fill(stored: i32, capacity: i32) -> f32 {
+  if capacity <= 0 {
+    return 0.0;
+  }
+  (stored.clamp(0, capacity) as f32) / (capacity as f32)
+}
+
+/// One accumulator's gauge as the renderer needs it: its block position and the tower's fill.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gauge {
+  pub pos: [i32; 3],
+  pub fill: f32,
+}
+
+/// The gauges this client draws, and the dimension they belong to. Published by the level pass,
+/// exactly as the wire set is; a different dimension replaces the set.
+#[derive(Debug, Default)]
+struct GaugeCache {
+  dimension: String,
+  gauges: Vec<Gauge>,
+}
+
+impl GaugeCache {
+  fn set(&mut self, dimension: &str, gauges: Vec<Gauge>) {
+    if self.dimension != dimension {
+      self.dimension.clear();
+      self.dimension.push_str(dimension);
+    }
+    self.gauges = gauges;
+  }
+}
+
+static GAUGE_CACHE: Mutex<GaugeCache> = Mutex::new(GaugeCache {
+  dimension: String::new(),
+  gauges: Vec::new(),
+});
+
+/// Publish the gauges the level's pass read. Called from a server hook, so it may run on any
+/// thread; the lock is held only for the move.
+pub fn publish_gauges(dimension: &str, gauges: Vec<Gauge>) {
+  GAUGE_CACHE
+    .lock()
+    .expect("the createaddition gauge cache lock is held for one publish")
+    .set(dimension, gauges);
+}
+
+/// The gauges to draw this frame.
+pub fn gauges() -> Vec<Gauge> {
+  GAUGE_CACHE
+    .lock()
+    .expect("the createaddition gauge cache lock is held for one read")
+    .gauges
+    .clone()
+}
+
+/// The world position of a gauge needle's pivot on its east face (the jar's base direction,
+/// rotated to the other three horizontal faces by the renderer).
+pub fn needle_pivot(pos: [i32; 3]) -> [f64; 3] {
+  let middle = centre(pos);
+  // dial.json's `(16, 6, 8)` in sixteenths, plus the renderer's `width/2 - 0.375` face offset,
+  // and `height - 0.5`: `(1.125, 0.375, 0.5)` relative to the block's lower north-west corner.
+  [middle[0] + 0.625, middle[1] - 0.125, middle[2]]
+}
+
+/// The world position of the needle's tip on its east face at `fill`, before the four horizontal
+/// rotations. The jar turns it `-180 * fill` degrees about the pivot, so empty points one way
+/// along the face and full the opposite way — the flip a screenshot can measure.
+pub fn needle_tip(pos: [i32; 3], fill: f32) -> [f64; 3] {
+  let pivot = needle_pivot(pos);
+  let along = rotate_x([0.0, 0.0, NEEDLE_LENGTH], needle_angle_deg(fill) as f64);
+  add_f64(pivot, along)
+}
+
+/// A right-handed rotation about the block's vertical axis, in degrees.
+fn rotate_y(point: [f64; 3], degrees: f64) -> [f64; 3] {
+  let angle = degrees.to_radians();
+  let (sin, cos) = angle.sin_cos();
+  [
+    point[0] * cos + point[2] * sin,
+    point[1],
+    -point[0] * sin + point[2] * cos,
+  ]
+}
+
+/// A rotation about a horizontal face's normal (the model's x axis), in degrees — the jar's
+/// `rotateXDegrees`.
+fn rotate_x(point: [f64; 3], degrees: f64) -> [f64; 3] {
+  let angle = degrees.to_radians();
+  let (sin, cos) = angle.sin_cos();
+  [
+    point[0],
+    point[1] * cos - point[2] * sin,
+    point[1] * sin + point[2] * cos,
+  ]
+}
+
+/// The needle quads one frame draws: four horizontal faces per gauge, rotated from the jar's
+/// pivot by `-180 * fill`. `camera` and `view_proj` are the frame's, as for [`frame`].
+pub fn gauge_frame(gauges: &[Gauge], camera: [f64; 3], view_proj: &[f32; 16]) -> Vec<Vertex> {
+  let mut vertices = Vec::with_capacity(gauges.len() * 4 * 6);
+  for gauge in gauges {
+    let middle = centre(gauge.pos);
+    let angle = needle_angle_deg(gauge.fill) as f64;
+    let pivot = needle_pivot(gauge.pos);
+    let tip = needle_tip(gauge.pos, gauge.fill);
+    let across = rotate_y(rotate_x([0.0, NEEDLE_HALF, 0.0], angle), 0.0);
+    for face in [0.0, 90.0, 180.0, 270.0] {
+      // The jar draws a gauge on all four horizontal faces and the block hides the two on the far
+      // side. This pass has no block model to occlude them, so skip a face whose normal points
+      // away from the camera: drawing both a near and a far needle would cancel the fill's flip.
+      let toward = [
+        camera[0] - middle[0],
+        camera[1] - middle[1],
+        camera[2] - middle[2],
+      ];
+      let normal = rotate_y([1.0, 0.0, 0.0], face);
+      if toward[0] * normal[0] + toward[1] * normal[1] + toward[2] * normal[2] <= 1e-9 {
+        continue;
+      }
+      let at = add_f64(middle, rotate_y(sub_f64(pivot, middle), face));
+      let along = rotate_y(sub_f64(tip, pivot), face);
+      let side = rotate_y(across, face);
+      let corners = [
+        sub_f64(at, side),
+        add_f64(at, side),
+        add_f64(add_f64(at, along), side),
+        add_f64(sub_f64(at, along), side),
+      ];
+      let clips = corners.map(|corner| {
+        clip(
+          [
+            (corner[0] - camera[0]) as f32,
+            (corner[1] - camera[1]) as f32,
+            (corner[2] - camera[2]) as f32,
+          ],
+          view_proj,
+        )
+      });
+      // A needle behind the camera is dropped whole, as a wire's quad is.
+      if clips.iter().any(|c| c[3] <= 0.001) {
+        continue;
+      }
+      for (index, colour) in [
+        (0, GAUGE_RGBA),
+        (1, GAUGE_RGBA),
+        (2, GAUGE_RGBA),
+        (0, GAUGE_RGBA),
+        (2, GAUGE_RGBA),
+        (3, GAUGE_RGBA),
+      ] {
+        vertices.push(Vertex {
+          clip: clips[index],
+          rgba: colour,
+        });
+      }
+    }
+  }
+  vertices
+}
+
+fn add_f64(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+  [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn sub_f64(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+  [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
 /// A connector's node: `3/16` of a block out of the face it is mounted on
 /// (`SmallConnectorBlockEntity.OFFSET_HEIGHT`, which the large one and the lamp share).
 ///
@@ -645,5 +838,134 @@ mod tests {
       "a quad behind the camera is dropped whole: {}",
       behind.len()
     );
+  }
+
+  #[test]
+  fn the_needle_angle_is_the_jars_minus_one_eighty_times_the_fill() {
+    // `ModularAccumulatorRenderer.renderDial`: `rotateXDegrees(-180.0F * gauge.getValue(partial))`.
+    assert!((needle_angle_deg(0.0) - 0.0).abs() < 1e-5);
+    assert!(
+      (needle_angle_deg(0.5) + 90.0).abs() < 1e-5,
+      "half full turns the needle ninety degrees: {}",
+      needle_angle_deg(0.5)
+    );
+    assert!(
+      (needle_angle_deg(1.0) + 180.0).abs() < 1e-5,
+      "full turns it the whole half circle: {}",
+      needle_angle_deg(1.0)
+    );
+  }
+
+  #[test]
+  fn a_gauges_fill_is_stored_over_capacity_and_clamped() {
+    assert_eq!(gauge_fill(0, 2_000_000), 0.0);
+    assert_eq!(gauge_fill(1_000_000, 2_000_000), 0.5);
+    assert_eq!(gauge_fill(2_000_000, 2_000_000), 1.0);
+    assert_eq!(
+      gauge_fill(3_000_000, 2_000_000),
+      1.0,
+      "a docked charge is still full"
+    );
+    assert_eq!(
+      gauge_fill(7, 0),
+      0.0,
+      "a zero-capacity gauge does not divide by zero"
+    );
+  }
+
+  #[test]
+  fn a_gauge_needle_points_the_opposite_way_when_full() {
+    // On the jar's base (east) face the needle reaches z 8..11.25 from its pivot at z 8, so an
+    // empty gauge's tip is 3.25/16 of a block to one side of the pivot and a full one's is that
+    // far to the other — the flip the screenshot leg counts. (Averaging all four faces would
+    // cancel, since the jar draws one on each side.)
+    let pivot = needle_pivot([0, 0, 0]);
+    let empty = needle_tip([0, 0, 0], 0.0);
+    let full = needle_tip([0, 0, 0], 1.0);
+    assert!(
+      (empty[2] - pivot[2] - NEEDLE_LENGTH).abs() < 1e-9,
+      "empty points along +z: {empty:?} from {pivot:?}"
+    );
+    assert!(
+      (pivot[2] - full[2] - NEEDLE_LENGTH).abs() < 1e-9,
+      "full points along -z: {full:?} from {pivot:?}"
+    );
+    assert!(empty[2] - full[2] > 2.0 * NEEDLE_LENGTH - 1e-9);
+    // And the frame really draws the cyan needle on all four faces, not a grey panel.
+    let frame = gauge_frame(
+      &[
+        Gauge {
+          pos: [0, 0, 0],
+          fill: 0.0,
+        },
+        Gauge {
+          pos: [0, 0, 0],
+          fill: 1.0,
+        },
+      ],
+      [4.5, 1.5, 0.5],
+      &straight(),
+    );
+    assert_eq!(
+      frame.len(),
+      12,
+      "two needles, one face toward this camera, six vertices a quad"
+    );
+    for vertex in &frame {
+      assert_eq!(
+        vertex.rgba, GAUGE_RGBA,
+        "the needle is the gauge's cyan, not a grey panel"
+      );
+    }
+  }
+
+  #[test]
+  fn a_gauge_draws_only_the_faces_that_look_at_the_camera() {
+    let middle = centre([4, 64, 9]);
+    let camera = [middle[0] + 4.0, middle[1] + 1.0, middle[2] + 1.0];
+    let vertices = gauge_frame(
+      &[Gauge {
+        pos: [4, 64, 9],
+        fill: 0.25,
+      }],
+      camera,
+      &straight(),
+    );
+    assert_eq!(
+      vertices.len(),
+      2 * 6,
+      "the east and south faces look at this camera; the far two are hidden by the block: {}",
+      vertices.len()
+    );
+  }
+
+  #[test]
+  fn a_gauge_cache_replaces_the_previous_levels_gauges() {
+    let mut cache = GaugeCache::default();
+    cache.set(
+      "minecraft:overworld",
+      vec![Gauge {
+        pos: [0, 0, 0],
+        fill: 0.5,
+      }],
+    );
+    assert_eq!(cache.gauges.len(), 1);
+    cache.set("minecraft:overworld", vec![]);
+    assert!(cache.gauges.is_empty());
+    cache.set(
+      "minecraft:the_end",
+      vec![Gauge {
+        pos: [1, 2, 3],
+        fill: 1.0,
+      }],
+    );
+    assert_eq!(
+      cache.gauges,
+      vec![Gauge {
+        pos: [1, 2, 3],
+        fill: 1.0
+      }]
+    );
+    assert_eq!(cache.dimension, "minecraft:the_end");
   }
 }

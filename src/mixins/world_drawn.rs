@@ -33,12 +33,17 @@ fn fs(input: Output) -> @location(0) vec4<f32> {
     wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4];
 
   let wires = createaddition::render::wires();
-  if wires.is_empty() {
+  let gauges = createaddition::render::gauges();
+  if wires.is_empty() && gauges.is_empty() {
     return;
   }
   let camera = [world.camera.x, world.camera.y, world.camera.z];
-  let vertices = createaddition::render::frame(&wires, camera, &world.view_proj.to_cols_array());
-  if vertices.is_empty() {
+  let view_proj = world.view_proj.to_cols_array();
+  let vertices = createaddition::render::frame(&wires, camera, &view_proj);
+  // The accumulator's needle uses this same pipeline and vertex layout — a second draw of the
+  // same shader, not a second render path. Both are separate buffers so either can be absent.
+  let gauge_vertices = createaddition::render::gauge_frame(&gauges, camera, &view_proj);
+  if vertices.is_empty() && gauge_vertices.is_empty() {
     return;
   }
   // The world's depth is attached only when it is the frame's own size: a pass's depth
@@ -113,14 +118,26 @@ fn fs(input: Output) -> @location(0) vec4<f32> {
     .expect("the wire pipeline is built above")
     .pipeline;
 
-  let bytes = createaddition::render::vertex_bytes(&vertices);
-  let buffer = world.device.create_buffer(&wgpu::BufferDescriptor {
+  let wire_bytes = createaddition::render::vertex_bytes(&vertices);
+  let wire_buffer = world.device.create_buffer(&wgpu::BufferDescriptor {
     label: Some("createaddition:wires"),
-    size: bytes.len() as u64,
+    size: wire_bytes.len().max(1) as u64,
     usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
     mapped_at_creation: false,
   });
-  world.queue.write_buffer(&buffer, 0, &bytes);
+  if !wire_bytes.is_empty() {
+    world.queue.write_buffer(&wire_buffer, 0, &wire_bytes);
+  }
+  let gauge_bytes = createaddition::render::vertex_bytes(&gauge_vertices);
+  let gauge_buffer = world.device.create_buffer(&wgpu::BufferDescriptor {
+    label: Some("createaddition:gauges"),
+    size: gauge_bytes.len().max(1) as u64,
+    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+    mapped_at_creation: false,
+  });
+  if !gauge_bytes.is_empty() {
+    world.queue.write_buffer(&gauge_buffer, 0, &gauge_bytes);
+  }
 
   {
     let mut pass = world
@@ -153,7 +170,13 @@ fn fs(input: Output) -> @location(0) vec4<f32> {
         multiview_mask: None,
       });
     pass.set_pipeline(pipeline);
-    pass.set_vertex_buffer(0, buffer.slice(..));
-    pass.draw(0..vertices.len() as u32, 0..1);
+    if !vertices.is_empty() {
+      pass.set_vertex_buffer(0, wire_buffer.slice(..));
+      pass.draw(0..vertices.len() as u32, 0..1);
+    }
+    if !gauge_vertices.is_empty() {
+      pass.set_vertex_buffer(0, gauge_buffer.slice(..));
+      pass.draw(0..gauge_vertices.len() as u32, 0..1);
+    }
   }
 }

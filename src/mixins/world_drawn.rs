@@ -33,13 +33,17 @@ fn fs(input: Output) -> @location(0) vec4<f32> {
     wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4];
 
   let wires = createaddition::render::wires();
+  let held = createaddition::render::held();
   let gauges = createaddition::render::gauges();
-  if wires.is_empty() && gauges.is_empty() {
+  if wires.is_empty() && held.is_empty() && gauges.is_empty() {
     return;
   }
   let camera = [world.camera.x, world.camera.y, world.camera.z];
   let view_proj = world.view_proj.to_cols_array();
-  let vertices = createaddition::render::frame(&wires, camera, &view_proj);
+  // A held spool's preview is drawn by the same `push_wire` as a laid wire, so it shares this
+  // vertex buffer and draw call (and the lightmap carried in 0.2.14) — no second mixin row.
+  let mut vertices = createaddition::render::frame(&wires, camera, &view_proj);
+  vertices.extend(createaddition::render::held_frame(&held, camera, &view_proj));
   // The accumulator's needle uses this same pipeline and vertex layout — a second draw of the
   // same shader, not a second render path. Both are separate buffers so either can be absent.
   let gauge_vertices = createaddition::render::gauge_frame(&gauges, camera, &view_proj);

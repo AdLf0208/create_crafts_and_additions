@@ -1,4 +1,47 @@
-# Validation — Create Crafts & Additions slices 1–15
+# Validation — Create Crafts & Additions slices 1–16
+
+## 0.2.15 — the held-wire preview (`clientRenderHeldWire`)
+
+Pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (nightly 2026-11-20), mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`; every cargo/package step inside one
+`ports/tools/build-slot.sh` lease (`CARGO_INCREMENTAL=0`, no `--target-dir`), with `BUILD_LOCAL=1`
+for the package and e2e steps. In-game legs: the launcher-built game tag
+`native-0a875da-88074f377b2f` (launcher 0.2.92).
+
+The slice, in one line: a real spool click's pending selection (block, node, wire kind) is published
+from the level pass and drawn by the existing `world_drawn` pipeline as a wire from the selected
+connector's node to the player, shaded by the 0.2.14 lightmap; the second click clears it. The red,
+the route and the coverage are in `notes.md` § *Slice 16*.
+
+```
+red, stubbed geometry + kind       117 passed, 3 failed  (wire-held-red.log)
+  a_pending_selection_keeps_the_wire_kind_of_the_spool_that_clicked
+    left: Some(([1,64,2], 3, Copper))   right: Some(([1,64,2], 3, Festive))
+  a_pending_selection_draws_a_wire_to_the_hand
+  the_preview_keeps_the_wires_own_green_colour
+tests                              120 passed, 0 failed  (sdk-test.log, regenerated for 0.2.15)
+clippy -D warnings                 0 warnings             (wire-held-clippy.log)
+cargo fmt --check                  clean                  (wire-held-fmt.log)
+two builds (rm Cargo.lock)         cmp-identical          (wire-held-build-1/2.log)
+check                              0.2.15, 206837 B       (wire-held-check.log)
+fits pin / other build             exit 2 / exit 2        (wire-held-fits-pin/other.log)
+launcher patch line                2 functions patched by 2 mixins (wire-held-launcher-patch.log)
+package verifier                   1/1                    (wire-held-verify-package.log)
+```
+
+Deliverable: `createaddition.hmod`, **206,837 B**, SHA-256
+`fa1558e908a71135c05be3fad0fe7f76312710ff73050d966c44a644932a1f94`, 127 entries, no packed
+`Cargo.lock`, `src/runtime.rs` byte-identical.
+
+```
+e2e-held-default.log               PASS + EXIT:0
+  NEGATIVE=1  SELECTED=209 green pixels rgb(13,66,7)  CLEARED=0
+e2e-held-negative.log              FAIL + EXIT:1   (NEGATIVE=1 inverts the no-selection count)
+e2e-held-selftest.log              FAIL + EXIT:1   (SELFTEST=preview demands pixels after the clear)
+e2e-held-control.log               FAIL + EXIT:1   (no package: createaddition:connector unknown)
+probe-held.log                     PASS + EXIT:0   (box measured from whole-frame green bboxes)
+check-e2e-logs.py --strict        logs=70 ok=70 missing-exit=0 bad-exit=0
+```
 
 ## 0.2.14 — the wire renderer's lightmap (the missing wire half)
 

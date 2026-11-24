@@ -11,8 +11,8 @@ rewrite, see `FINDINGS.md`).
 **LOCAL-ONLY** until the maintainer approves publishing (ARCHITECTURE.md §8).
 MIT is licence rank 0 (permissive); the approval is still required.
 
-Status: **slice 15 implemented and delivered as a flat SDK package (mod API 0.2), version
-0.2.14** — the two connectors, wire links and the modular accumulator, with the jar's rates and
+Status: **slice 16 implemented and delivered as a flat SDK package (mod API 0.2), version
+0.2.15** — the two connectors, wire links and the modular accumulator, with the jar's rates and
 connection rules, plus the **redstone relay** that bridges one wire network into another while
 powered, the **small light connector** whose lamp draws 1 FE a tick and lights while its network
 pays it, the accumulator's **comparator output** (the jar's fill fraction), the **creative
@@ -32,7 +32,9 @@ clears, § [`## Slice 12 — the lifecycle clears (0.2.11)`](#slice-12--the-life
 0.2.12 the support rule; 0.2.13 the accumulator's gauge needle, §
 [`## Slice 14 — the accumulator's gauge readout (0.2.13)`](#slice-14--the-accumulators-gauge-readout-0213);
 0.2.14 the wire renderer's lightmap, §
-[`## Slice 15 — the wire renderer's lightmap (0.2.14)`](#slice-15--the-wire-renderers-lightmap-0214).) The
+[`## Slice 15 — the wire renderer's lightmap (0.2.14)`](#slice-15--the-wire-renderers-lightmap-0214);
+0.2.15 the held-wire preview, §
+[`## Slice 16 — the held-wire preview (0.2.15)`](#slice-16--the-held-wire-preview-0215).) The
 0.1.0 `.hnmod` was retired by Horizon's mod-API merge (#16941); the migration is
 [`## Migration to the SDK format`](#migration-to-the-sdk-format), and the 0.1.0 in-game evidence
 stays historical (`## Gaps`).
@@ -2311,7 +2313,7 @@ createaddition (1 of 1)` line and the two patched functions.
 | a vertical wire has no division by zero | **tested** — `a_vertical_wire_is_drawn_without_a_division_by_zero` |
 | the wire is hidden by walls (the world's depth) | **not proven in game** — the pass attaches `WorldDrawn::depth` with reversed comparison, but this leg's wire hangs in the open; a wall between camera and wire is the assertion that would prove it |
 | a wire on a remote (dedicated/LAN guest) client | **not ported** — the port syncs no block-entity data, so a remote client has no links to draw (deviation 5) |
-| the wire being placed (the spool's held-wire line to the player) | **not ported** — `clientRenderHeldWire`, upstream's preview of a wire being laid (`WireNodeRenderer.render`'s second half); a later slice |
+| the wire being placed (the spool's held-wire line to the player) | **tested in 0.2.15** — § [`## Slice 16`](#slice-16--the-held-wire-preview-0215): `clientRenderHeldWire` drawn on the same `world_drawn` pipeline; in game 209 green pixels with a selection, 0 after the second click and 0 with none |
 | the lightmap on a wire (block/sky light interpolation) | **not ported** — the wire is drawn at its type's colour without the jar's `LightTexture` interpolation (deviation 6) |
 
 ### Deviations of this slice (declared)
@@ -3417,17 +3419,156 @@ saved type.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port
 
+## Slice 16 — the held-wire preview (0.2.15)
+
+### The slice, the gap line and the tier fit
+
+From this file's `## Next slice` (0.2.14) and slice 10's coverage row:
+
+> "the wire being placed (the spool's held-wire line to the player) | **not ported** —
+> `clientRenderHeldWire`, upstream's preview of a wire being laid (`WireNodeRenderer.render`'s
+> second half); a later slice"
+
+**Choice.** The wire is drawn, coloured, sagging, lit with the jar's festive string and shaded by
+the 0.2.14 lightmap; the last visible difference from the jar that is inside this port's reach is
+the line drawn while a loaded spool has a connector selected. The goggles-style readout, the mode
+wrench and the `PhysicsBlock`/display-link source stay **blocked** (no Create mod-to-mod API); the
+brush wire drop stays on the level path.
+
+**Tier fit.** `deep`: the same `world_drawn` mixin, the same wgpu pipeline and wire vertex buffer,
+the same published wire set and the lightmap — only a second `Wire` is added per pending selection.
+No new block, item, content file or `[[native.mixin]]` row: the two existing rows are unchanged.
+
+### What the jar does (analysis only, `WireNodeRenderer.java` @ `658a390`)
+
+`render()`'s second half, guarded by `ClientEventHandler.clientRenderHeldWire`:
+
+- `Util.getWireNodeOfSpools(player.getInventory().getSelected())` gives the selected block, node
+  index and the spool's `WireType`; only if `nodePos.equals(te.getPos())` does this block draw it.
+- `te.getNodeOffset(nodeIndex)` is the start; the stack is translated to
+  `player.getPosition(partialTicks) + 0.5` and `wireRender` is called with the vector back to the
+  node — so the preview is a wire from the node to the player, at the player's block's light.
+- The same `Mth.lerp`/`LightTexture.pack` path and wire colour as a laid wire.
+
+`WorldDrawn` carries the camera but no player, so the server pass publishes the three values the
+way it publishes laid wires and gauges. `Pending` keeps the wire kind beside the block/node
+(upstream reads it back from the stack's custom data); `publish_held` reads the online player's
+position, the node attach point and the jar's two light reads, and `render::held_frame` reuses
+`push_wire`. The helper appends those vertices to the laid wires' own buffer and draw call.
+
+### Red → green (TDD)
+
+Written against stubs (`held_frame` returned no vertices; `Pending::selection` reported Copper for
+every selection) and watched fail. `wire-held-red.log`, verbatim:
+
+```
+thread 'network::tests::a_pending_selection_keeps_the_wire_kind_of_the_spool_that_clicked' (1869671) panicked at src/network.rs:5182:5:
+assertion `left == right` failed: the preview must use the kind of the spool that made the selection
+  left: Some(([1, 64, 2], 3, Copper))
+ right: Some(([1, 64, 2], 3, Festive))
+thread 'render::tests::a_pending_selection_draws_a_wire_to_the_hand' (1869719) panicked at src/render.rs:1219:5:
+a held spool's selection must draw a preview wire to the player
+thread 'render::tests::the_preview_keeps_the_wires_own_green_colour' (1869732) panicked at src/render.rs:1236:5:
+the preview must keep the festive wire's own green hue, not draw a grey panel
+test result: FAILED. 117 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Green: **120 passed, 0 failed** (`sdk-test.log`, regenerated for 0.2.15; 116 → 120: four new
+tests). They pin the preview's vertices, the empty-selection no-op, the wire's own hue (the tube is
+the majority; the festive lights are deliberately red/green/blue) and the stored wire kind.
+
+### The 0.2.15 ladder
+
+| Step | Command | Result |
+|---|---|---|
+| red | `cargo test --offline` against the stubs | **117 passed, 3 failed**, exit 101 (`wire-held-red.log`) |
+| tests | `cargo test --offline` | **120 passed**, 0 failed (`sdk-test.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| formatting | `cargo fmt --check` | clean (`sdk-fmt.log`) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` | exit 0 (`wire-held-build-1.log`) |
+| package, second build | the same again | **byte-identical** (`cmp`, `wire-held-build-2.log`) |
+| registry check | `cargo horizon-mod check createaddition.hmod` | 0.2.15, 206,837 B (`wire-held-check.log`) |
+| fits, pin | `… fits … --build 0a875da…` | **"made for exactly one build (it has a [native.mixin] table), so fits doesn't apply"**, exit 2 (`wire-held-fits-pin.log`) |
+| fits, other build | `… --build 0b14f8a…` | the same refusal, exit 2 (`wire-held-fits-other.log`) |
+| launcher build | `launcher-game.sh build createaddition` | `Compiling createaddition (1 of 1)`, tag `native-0a875da-88074f377b2f` (`wire-held-launcher-build.log`); the launcher's log: `Compiling createaddition: 8915 ms` and `Function replacement: 2 functions patched by 2 mixins, without rebuilding the game (copy 68 ms, horizon-mixins 102 ms, compile 1295 ms, total 1466 ms)` (`wire-held-launcher-patch.log`); identity `0a875da91dbb… createaddition 0.2.15 1.99.1` |
+| package verifier | `python3 ports/tools/verify-sdk-package.py createaddition` | **1/1**, incl. `package matches the tree` (`wire-held-verify-package.log`) |
+| data shape / carry / licence / recipes | the four existing tools | 6/6 26.3, jar carry matches, upstream notice verbatim, `createaddition: ok` |
+
+The two `fits` refusals are the route's price, unchanged since 0.2.9; the substitute is the launcher
+build above, which recompiled the mod and re-applied both mixins against `0a875da`. The stale 0.2.14
+`native-*` tag was removed after the build.
+
+Deliverable: **`createaddition.hmod`, 206,837 B, SHA-256
+`fa1558e908a71135c05be3fad0fe7f76312710ff73050d966c44a644932a1f94`**, 127 entries, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too).
+
+### In-game (`e2e-held-default.log`, `PASS` + `EXIT:0`)
+
+A dedicated leg (`tools/e2e-held.sh`): `--offscreen`, a connector in the End on a stone pad, a
+festive spool in the hotbar, a glowstone for the only light. `/createaddition signals` is read back
+as a parsed `pending=1` / `pending=0` assertion at each click. Three settled screenshots are read
+by `green_stats`, which counts only green-dominant pixels in the measured connector→hand box:
+
+```
+== the three pixel counts: NEGATIVE=1 SELECTED=209 CLEARED=0 ==
+PASS: the held-wire preview — SELECTED=209 green pixels rgb(13,66,7), CLEARED=0, NEGATIVE=1
+```
+
+`HELD_PROBE=1` (`probe-held.log`, `held-*.png`) measured the box: the no-selection frame's only
+green is the held spool's item sprite at the bottom of the frame (whole-frame bbox y 570..719),
+while the preview adds a green ribbon starting at y 348; the box y 38–72 % counts the ribbon and
+excludes the sprite. The second click targets the **same** connector — this port's documented
+clear-selection path — so no laid wire's own green pixels share the box (a wire between two
+connectors was measured in the box and is not distinguishable by colour); the wire-laid path is
+proved in the same log by `/createaddition link` + the parsed `info` reply
+(`links [(260,101,0)/0/festive]`).
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-held-default.log` | `PASS` + `EXIT:0` | selection → 209 green pixels `rgb(13,66,7)`; second click → `pending=0` and 0 pixels; no selection → 1; the wire can still be laid as festive |
+| `e2e-held-negative.log` | `FAIL` + `EXIT:1` | `NEGATIVE=1` inverts the no-selection count (0 < 100) and ends 1 |
+| `e2e-held-selftest.log` | `FAIL` + `EXIT:1` | `SELFTEST=preview` demands preview pixels after the clear (18 < 100) and ends 1 |
+| `e2e-held-control.log` | `FAIL` + `EXIT:1` | a Nightly without the package cannot place `createaddition:connector`, so the counted green comes from this package |
+
+`python3 ports/tools/check-e2e-logs.py createaddition-e2e --strict`:
+**logs=70 ok=70 missing-exit=0 bad-exit=0** — the 66 earlier logs stay green.
+
+### Coverage added by this slice
+
+| family | status |
+|---|---|
+| a pending selection draws a line to the player | **tested** — `a_pending_selection_draws_a_wire_to_the_hand`; in game SELECTED=209 green pixels |
+| the preview keeps the spool's wire kind and hue | **tested** — `a_pending_selection_keeps_the_wire_kind_of_the_spool_that_clicked`, `the_preview_keeps_the_wires_own_green_colour`; in game `rgb(13,66,7)` |
+| no selection draws nothing | **tested** — `no_pending_selection_draws_no_preview`; in game CLEARED=0, NEGATIVE=1, both counterfactual legs EXIT:1 |
+| the preview uses the same pipeline, buffer and lightmap | **tested** — `held_frame` calls `push_wire`; the launcher re-applied both unchanged mixin rows |
+| the wire-laid path is not regressed | **tested** — `/createaddition link` + parsed `info` reply in the same log |
+
+### Deviations of this slice (declared)
+
+1. **The hand anchor is the player's feet + ½ block**, published from the server pass, not a
+   per-frame client read of the held stack: `WorldDrawn` carries no player and the SDK has no
+   held-stack read from a level pass. The preview therefore tracks the player's position but not a
+   switch of held item mid-click; the selection is cleared by the next click, logout or level close.
+2. **The clear frame uses a second click on the same connector**, not a wire laid to a second
+   connector: a laid wire occupies the same screen box and cannot be told from the preview by its
+   green pixels. The wire-laid path is asserted separately in the same log.
+3. **The light reads are at the player's block and the selected connector**, as the jar's
+   `wireRender` does for its held-wire call; a no-sky dimension contributes no sky light.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
 ## Next slice
 
 The goggles-style readout, the mode wrench and the `PhysicsBlock`/display-link source remain
-**blocked**: they need Create's mod-to-mod API, which a package cannot reach. The brush wire drop
-is on the level path and is deliberately not attempted from the renderer. The highest-value
-workable family left is the **held-wire preview** (`WireNodeRenderer`'s second half,
-`clientRenderHeldWire`): the line from the selected connector's node to the player's hand while a
-spool is held, using the same `world_drawn` pipeline and the spool's pending selection the server
-already publishes through `/createaddition signals`. The concrete in-game assertion: select a
-spool, click one connector, hold it in view, take an `--offscreen` screenshot and count the
-green-dominant pixels of the preview line in the box between the connector and the hand; a second
-frame after the second click (wire laid, selection cleared) must show 0 preview pixels, and a
-`NEGATIVE=1` leg with no selection must show 0 as well.
+**blocked**: they need Create's mod-to-mod API, which a package cannot reach. The brush wire drop is
+the one family the brief leaves on the **level path** and is the next workable slice: a brush that
+detaches a wire from a connector drops the wire on the ground (four of the wire's own kind, copper's
+for a festive wire, as 0.2.10's break path already establishes) instead of coiling it onto a spool.
+The gap line is this file's 0.2.14/0.2.15 slice note — *"the brush wire drop stays on the level
+path"*. It fits **deep** (block-entity data + a level pass, no new renderer or mixin row). The
+concrete in-game assertion: give a connector one festive wire, detach it with the brush path and
+read the connector's `links []` plus exactly four `createaddition:copper_wire` items on the ground
+in the End arena; a control with an empty connector must drop 0, and `SELFTEST=brush` must invert
+one count and end `EXIT:1`.
 

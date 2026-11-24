@@ -138,7 +138,14 @@ impl Hooks for Mod {
       .lock()
       .expect("the createaddition tick queue lock is held for one drain")
       .take(event.level);
-    network::level_ticked(host, event.level, &queued, &self.signals, &self.supports);
+    network::level_ticked(
+      host,
+      event.level,
+      &queued,
+      &self.signals,
+      &self.supports,
+      &self.pending,
+    );
   }
 
   /// `/createaddition info|energy|link|unlink|mode|signals`: the harness's readout and the controls

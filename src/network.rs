@@ -880,6 +880,70 @@ fn publish_gauges(
   render::publish_gauges(level.dimension_id(), gauges);
 }
 
+/// The wire being laid this tick, for the renderer: upstream's `clientRenderHeldWire` half.
+///
+/// Upstream reads the selected node and the wire kind off the held spool's stack data, and draws
+/// from the node to `player.getPosition(partialTicks) + 0.5` (`WireNodeRenderer.render`). A
+/// `WorldDrawn` frame carries the camera but no player, so this pass publishes the same three
+/// values from the mod's own `Pending` store and the server's player list; the client's
+/// `world_drawn` helper then draws it through the wire pipeline. The light reads are the jar's:
+/// block/sky at the player's block (0) and at the selected connector (1), so the preview is
+/// shaded by the same 0.2.14 lightmap as a laid wire.
+fn publish_held(host: &mut dyn ServerHost, level: LevelRef, pending: &Mutex<Pending>) {
+  let dimension = level.dimension_id().to_owned();
+  // Take the lock for one copy only: every call below reaches the host, and a host call may
+  // re-enter another mod hook (`spool_click` keeps the same rule).
+  let selections = pending
+    .lock()
+    .expect("the createaddition pending-selection lock is held for one publish")
+    .selections();
+  let keys = Keys::resolve(host);
+  let mut held: Vec<render::HeldWire> = Vec::new();
+  for (who, pos, node, kind) in selections {
+    let Some(player) = host
+      .players()
+      .server_players()
+      .into_iter()
+      .find(|player| player.uuid() == who)
+    else {
+      continue;
+    };
+    if player.level(host) != Some(level) {
+      continue;
+    }
+    let Some(foot) = player.entity().position(host) else {
+      continue;
+    };
+    let Some(saved) = keys.and_then(|keys| saved_at(host, level, keys, pos)) else {
+      continue;
+    };
+    if saved.kind.wire_node().is_none() {
+      continue;
+    }
+    let centre = render::centre(pos);
+    let facing = level
+      .block_property(host, pos, FACING)
+      .and_then(|name| face_named(&name))
+      .unwrap_or(Direction::North);
+    let to = if saved.kind == Kind::Relay {
+      let vertical = level.block_property(host, pos, VERTICAL).as_deref() == Some("true");
+      // A relay's 0–3 nodes are its input port, 4–7 its output (`WireNodeKind::portOf`).
+      render::attach_relay(centre, facing.normal(), vertical, node < 4)
+    } else {
+      render::attach_connector(centre, facing.normal())
+    };
+    let player_block = [foot[0] as i32, foot[1] as i32, foot[2] as i32];
+    held.push(render::HeldWire {
+      // Upstream's stack translate: the wire starts at the player's feet + half a block.
+      from: [foot[0] + 0.5, foot[1] + 0.5, foot[2] + 0.5],
+      to,
+      kind,
+      light: wire_light(host, level, player_block, pos),
+    });
+  }
+  render::publish_held(&dimension, held);
+}
+
 /// The level the server ticks now: the one a block entity's tick runs in.
 fn level_in_place(host: &dyn ServerHost) -> Option<LevelRef> {
   host
@@ -905,25 +969,48 @@ fn level_in_place(host: &dyn ServerHost) -> Option<LevelRef> {
 #[derive(Default)]
 pub(crate) struct Pending {
   at: HashMap<u128, (Pos, i32)>,
+  /// The wire kind of the spool that made each selection: upstream reads it back from the held
+  /// stack's `custom_data`; the port keeps it here because the SDK cannot rewrite that stack.
+  kinds: HashMap<u128, WireKind>,
 }
 
 impl Pending {
   /// The selection `player` made, if any; taking it clears it.
   fn take(&mut self, player: u128) -> Option<(Pos, i32)> {
+    self.kinds.remove(&player);
     self.at.remove(&player)
   }
 
-  /// Record (or clear) `player`'s selection.
-  fn put(&mut self, player: u128, at: Option<(Pos, i32)>) {
-    if let Some(at) = at {
-      self.at.insert(player, at);
-    } else {
-      self.at.remove(&player);
-    }
+  /// Record a first click with the wire kind of the spool that made it.
+  fn put_with_kind(&mut self, player: u128, at: (Pos, i32), kind: WireKind) {
+    self.at.insert(player, at);
+    self.kinds.insert(player, kind);
+  }
+
+  /// One player's selection with the wire kind of the spool that made it: upstream's
+  /// `Util.getWireNodeOfSpools` reads the same three values off the held stack's custom data.
+  fn selection(&self, player: u128) -> Option<(Pos, i32, WireKind)> {
+    let (pos, node) = *self.at.get(&player)?;
+    let kind = *self.kinds.get(&player)?;
+    Some((pos, node, kind))
+  }
+
+  /// Every selection with its wire kind, for the level pass (no lock held during host calls).
+  fn selections(&self) -> Vec<(u128, Pos, i32, WireKind)> {
+    self
+      .at
+      .iter()
+      .filter_map(|(&who, &(pos, node))| {
+        self
+          .selection(who)
+          .map(|(_, _, kind)| (who, pos, node, kind))
+      })
+      .collect()
   }
 
   /// Forget `player`'s click in progress: they left the world (`player_logged_out`).
   pub(crate) fn forget(&mut self, player: u128) {
+    self.kinds.remove(&player);
     self.at.remove(&player);
   }
 
@@ -932,6 +1019,7 @@ impl Pending {
   pub(crate) fn clear(&mut self) -> usize {
     let count = self.at.len();
     self.at.clear();
+    self.kinds.clear();
     count
   }
 
@@ -1354,7 +1442,7 @@ fn spool_click(
     pending
       .lock()
       .expect("the createaddition pending-selection lock is held for one insert")
-      .put(who, Some((click.pos, node)));
+      .put_with_kind(who, (click.pos, node), wire.drawn());
     feedback(host, "Wire connector selected.");
     return Some(InteractionResult::Success);
   };
@@ -1869,6 +1957,7 @@ pub(crate) fn level_ticked(
   queued: &BTreeSet<Pos>,
   signals: &Mutex<Signals>,
   supports: &Mutex<Supports>,
+  pending: &Mutex<Pending>,
 ) {
   let Some(keys) = Keys::resolve(host) else {
     return;
@@ -1973,6 +2062,9 @@ pub(crate) fn level_ticked(
   // tick's links and no earlier ones. The gauges follow the same pass's fills, after the moves.
   publish_wires(host, level, &blocks);
   publish_gauges(host, level, &blocks, &towers);
+  // The spool's wire in progress, after the links this tick laid: a selection consumed by a
+  // second click is gone from `Pending` by now, so the next frame draws no preview.
+  publish_held(host, level, pending);
 }
 
 /// Record each accumulator's comparator answer for the hook and tell the comparators beside a
@@ -4043,7 +4135,7 @@ mod tests {
     // spool: the selection cannot live on the stack (found in game, `probe-festive.log`).
     let mut pending = Pending::default();
     assert_eq!(pending.take(7), None, "no selection before the first click");
-    pending.put(7, Some(([1, 64, 2], 3)));
+    pending.put_with_kind(7, ([1, 64, 2], 3), WireKind::Copper);
     assert_eq!(pending.take(7), Some(([1, 64, 2], 3)));
     assert_eq!(
       pending.take(7),
@@ -4051,16 +4143,16 @@ mod tests {
       "the lookup that lays the wire consumes the selection"
     );
     // A second spool replaces the first selection: the pending is the player's, not the stack's.
-    pending.put(7, Some(([1, 64, 2], 0)));
-    pending.put(7, Some(([4, 64, 2], 1)));
+    pending.put_with_kind(7, ([1, 64, 2], 0), WireKind::Copper);
+    pending.put_with_kind(7, ([4, 64, 2], 1), WireKind::Copper);
     assert_eq!(pending.take(7), Some(([4, 64, 2], 1)));
     // Another player's selection is their own.
-    pending.put(9, Some(([2, 64, 2], 0)));
+    pending.put_with_kind(9, ([2, 64, 2], 0), WireKind::Copper);
     assert_eq!(pending.take(7), None);
     assert_eq!(pending.take(9), Some(([2, 64, 2], 0)));
     // A click on the same block clears it (upstream empties the stack's data).
-    pending.put(7, Some(([1, 64, 2], 0)));
-    pending.put(7, None);
+    pending.put_with_kind(7, ([1, 64, 2], 0), WireKind::Copper);
+    pending.forget(7);
     assert_eq!(pending.take(7), None);
   }
 
@@ -4827,8 +4919,8 @@ mod tests {
     // The player-keyed half the brief asks about: a spool's first click is a click in progress, so
     // it must not survive the level it was made in or the player who made it.
     let mut pending = Pending::default();
-    pending.put(7, Some(([1, 64, 3], 0)));
-    pending.put(9, Some(([4, 64, 6], 1)));
+    pending.put_with_kind(7, ([1, 64, 3], 0), WireKind::Copper);
+    pending.put_with_kind(9, ([4, 64, 6], 1), WireKind::Copper);
     assert_eq!(pending.len(), 2);
     pending.forget(7);
     assert_eq!(
@@ -4841,8 +4933,8 @@ mod tests {
       Some(([4, 64, 6], 1)),
       "the other player's click in progress is still theirs"
     );
-    pending.put(9, Some(([4, 64, 6], 1)));
-    pending.put(7, Some(([1, 64, 3], 0)));
+    pending.put_with_kind(9, ([4, 64, 6], 1), WireKind::Copper);
+    pending.put_with_kind(7, ([1, 64, 3], 0), WireKind::Copper);
     assert_eq!(pending.clear(), 2, "a level close drops every selection");
     assert_eq!(pending.len(), 0);
     assert_eq!(pending.clear(), 0, "clearing an empty set is free");
@@ -5139,5 +5231,24 @@ mod tests {
         "{kind:?} is not a wire block and is never support-checked"
       );
     }
+  }
+
+  /// The pending selection the renderer draws must carry the wire kind of the spool that clicked,
+  /// as upstream reads `WireType` back from the stack's custom data. Written against a stub that
+  /// reported `WireKind::Copper` for every selection and watched fail.
+  #[test]
+  fn a_pending_selection_keeps_the_wire_kind_of_the_spool_that_clicked() {
+    let mut pending = Pending::default();
+    pending.put_with_kind(7, ([1, 64, 2], 3), WireKind::Festive);
+    assert_eq!(
+      pending.selection(7),
+      Some(([1, 64, 2], 3, WireKind::Festive)),
+      "the preview must use the kind of the spool that made the selection"
+    );
+    assert_eq!(
+      pending.selections(),
+      vec![(7, [1, 64, 2], 3, WireKind::Festive)],
+      "the renderer publishes the selection with its kind"
+    );
   }
 }

@@ -249,6 +249,88 @@ pub fn gauges() -> Vec<Gauge> {
     .clone()
 }
 
+// --- a wire being laid (the held-spool preview) --------------------------------
+//
+// Upstream's `WireNodeRenderer.render` draws a second wire when a loaded spool is held: from the
+// selected connector's node to the player, in the spool's wire colour (`clientRenderHeldWire`).
+// `WorldDrawn` carries the camera but no player, so the server level pass publishes the selection
+// into this cache the way it publishes laid wires and gauges. `held_frame` reuses `push_wire`, so
+// the preview gets the jar's catenary and the 0.2.14 lightmap for free, and the existing wire
+// vertex buffer and draw call need no second `[[native.mixin]]` row.
+
+/// A wire being laid: from the player's feet anchor to the selected connector's node.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeldWire {
+  /// Start: the player's feet plus half a block (upstream's `stack.translate(tx + .5, …)`).
+  pub from: [f64; 3],
+  /// End: the selected node's world position (`te.getNodeOffset(nodeIndex)`).
+  pub to: [f64; 3],
+  /// The wire kind of the spool that made the selection (`WireType` from its custom data).
+  pub kind: WireKind,
+  /// Block/sky light at the player's block (0) and the selected connector (1).
+  pub light: Light,
+}
+
+#[derive(Debug, Default)]
+struct HeldCache {
+  dimension: String,
+  held: Vec<HeldWire>,
+}
+
+impl HeldCache {
+  fn set(&mut self, dimension: &str, held: Vec<HeldWire>) {
+    if self.dimension != dimension {
+      self.dimension.clear();
+      self.dimension.push_str(dimension);
+    }
+    self.held = held;
+  }
+}
+
+static HELD_CACHE: Mutex<HeldCache> = Mutex::new(HeldCache {
+  dimension: String::new(),
+  held: Vec::new(),
+});
+
+/// Publish the wire in progress the level's pass saw. Called from a server hook, so it may run on
+/// any thread; the lock is held only for the move.
+pub fn publish_held(dimension: &str, held: Vec<HeldWire>) {
+  HELD_CACHE
+    .lock()
+    .expect("the createaddition held-wire cache lock is held for one publish")
+    .set(dimension, held);
+}
+
+/// The wire being laid this frame, if any.
+pub fn held() -> Vec<HeldWire> {
+  HELD_CACHE
+    .lock()
+    .expect("the createaddition held-wire cache lock is held for one read")
+    .held
+    .clone()
+}
+
+/// The vertices of the held spool's preview: the same `push_wire` as a laid wire, so the catenary,
+/// the 0.7 alternating shade and the 0.2.14 lightmap are the jar's, and the festive wire keeps its
+/// string of lights. The caller appends these to the laid wires' own vertex buffer and draw call.
+pub fn held_frame(held: &[HeldWire], camera: [f64; 3], view_proj: &[f32; 16]) -> Vec<Vertex> {
+  let mut vertices = Vec::new();
+  for preview in held {
+    push_wire(
+      &mut vertices,
+      &Wire {
+        from: preview.from,
+        to: preview.to,
+        kind: preview.kind,
+        light: preview.light,
+      },
+      camera,
+      view_proj,
+    );
+  }
+  vertices
+}
+
 /// The world position of a gauge needle's pivot on its east face (the jar's base direction,
 /// rotated to the other three horizontal faces by the renderer).
 pub fn needle_pivot(pos: [i32; 3]) -> [f64; 3] {
@@ -1130,5 +1212,55 @@ mod tests {
       }]
     );
     assert_eq!(cache.dimension, "minecraft:the_end");
+  }
+
+  /// The held-spool preview: a selection must draw a wire to the player's hand, and no selection
+  /// must draw nothing. These were written against the stubbed `held_frame` (which returned no
+  /// vertices) and watched fail before the geometry was implemented.
+  fn held_rig() -> HeldWire {
+    HeldWire {
+      from: [10.0, 1.5, 3.0],
+      to: [8.0, 1.5, 0.0],
+      kind: WireKind::Festive,
+      light: Light {
+        block: [15, 15],
+        sky: [0, 0],
+      },
+    }
+  }
+
+  #[test]
+  fn a_pending_selection_draws_a_wire_to_the_hand() {
+    let vertices = held_frame(&[held_rig()], [10.0, 1.5, 4.0], &straight());
+    assert!(
+      !vertices.is_empty(),
+      "a held spool's selection must draw a preview wire to the player"
+    );
+  }
+
+  #[test]
+  fn no_pending_selection_draws_no_preview() {
+    assert!(
+      held_frame(&[], [10.0, 1.5, 4.0], &straight()).is_empty(),
+      "with no selection there is no held wire to draw"
+    );
+  }
+
+  #[test]
+  fn the_preview_keeps_the_wires_own_green_colour() {
+    let vertices = held_frame(&[held_rig()], [10.0, 1.5, 4.0], &straight());
+    // The tube is the wire's own festive green; the string of lights on every third point is
+    // deliberately red/green/blue, so the tube must be the majority, not every vertex.
+    let green = vertices
+      .iter()
+      .filter(|vertex| {
+        vertex.rgba[1] > vertex.rgba[0] + 0.15 && vertex.rgba[1] > vertex.rgba[2] + 0.15
+      })
+      .count();
+    assert!(
+      !vertices.is_empty() && green * 2 > vertices.len(),
+      "the preview must keep the festive wire's own green hue, not draw a grey panel: {green} green of {} vertices",
+      vertices.len()
+    );
   }
 }

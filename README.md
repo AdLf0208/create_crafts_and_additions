@@ -93,9 +93,13 @@ Each block drops itself when mined with a pickaxe (its own 26.3 loot table, and 
   it is the source.
 - The **client half** is a renderer in the frame's own wgpu pass: a laid wire is drawn as a ribbon
   on the jar's catenary in its `WireType` colour (a festive wire carries its string of lights), and
-  the **accumulator's gauge needle** is drawn on all four horizontal faces at the jar's own
-  `rotateXDegrees(-180 * fill)` — empty points one way, full the other. Both use one pipeline and
-  the depth of the frame; a single-player or LAN-host client draws what its own level's pass read.
+  **while a loaded spool is held after the first click** its wire in progress is drawn from the
+  selected connector's node to the player (`clientRenderHeldWire`), in the spool's own colour and
+  under the same block/sky lightmap; the second click clears it. The **accumulator's gauge needle**
+  is drawn on all four horizontal faces at the jar's own
+  `rotateXDegrees(-180 * fill)` — empty points one way, full the other. All three use one pipeline,
+  the wire vertex buffer and the depth of the frame; a single-player or LAN-host client draws what
+  its own level's pass read.
 
 ## Commands
 
@@ -121,7 +125,7 @@ not treated as an orphan; only a support that goes away takes its block.
 ## Layout
 
 ```
-horizon-mod.toml               the only manifest and identity: id, version 0.2.14, api 0.2, [native]
+horizon-mod.toml               the only manifest and identity: id, version 0.2.15, api 0.2, [native]
 Cargo.toml                     one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/rustfmt.toml               tab_spaces = 2, the campaign's style (a root one is refused)
 src/lib.rs                     the one impl Hooks: register, level_tick_post, the three lifecycle clears, commands
@@ -149,7 +153,7 @@ and the old `content/`) is evidence at
 
 ```sh
 cd ports/createaddition
-CARGO_INCREMENTAL=0 cargo test --offline                    # 84 tests
+CARGO_INCREMENTAL=0 cargo test --offline                    # 120 tests
 CARGO_INCREMENTAL=0 cargo clippy --all-targets --offline -- -D warnings
 cargo fmt --check                                           # never --all: it formats the SDK
 rm -f Cargo.lock && cargo horizon-mod build                  # -> target/horizon-mod/createaddition.hmod

@@ -1736,6 +1736,102 @@ fn links_without(links: &[SavedWire], gone: Pos) -> Vec<SavedWire> {
     .collect()
 }
 
+/// What a brush does to a connector's wires. Upstream's brush is the shears path in
+/// `AbstractConnectorBlock.useItemOn`: only when the connector `hasAnyConnection()` does it take
+/// every wire out and drop each on the ground — the **level** path (`dropWires(Level, boolean)` →
+/// `type.getDrop()`, four items of the wire's own kind and a festive wire's four copper ones),
+/// not the wrench's player path that coils wires back onto spools. It clears the peer's reciprocal
+/// node without a second drop. A brush on an empty connector is a no-op.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BrushPlan {
+  /// One stack per wire kind, in `WireType`'s own order, four items per wire. The item id is the
+  /// resolved drop (`wire_drop`): a festive wire's four are a **copper** wire's.
+  drops: Vec<(&'static str, u32)>,
+  /// The saved positions whose link back to this connector must be cleared, in saved order.
+  peers: Vec<Pos>,
+}
+
+/// The pure brush rule. An empty connector has no `hasAnyConnection()`, so it is a no-op;
+/// otherwise every wire's peer goes and the level path drops the wire's own kind (a festive wire's
+/// copper's four) when items are allowed.
+fn brush_plan(wires: &[SavedWire], drop_items: bool) -> BrushPlan {
+  if wires.is_empty() {
+    return BrushPlan {
+      drops: Vec::new(),
+      peers: Vec::new(),
+    };
+  }
+  BrushPlan {
+    drops: break_stacks(wires, drop_items)
+      .into_iter()
+      .map(|(kind, count)| (wire_drop(kind), count))
+      .collect(),
+    peers: wires.iter().map(|saved| saved.pos).collect(),
+  }
+}
+
+/// A brush is drawn over a connector: every wire is taken out, the connector stays in the world,
+/// the wires drop at its position (the level path, not the wrench's spool coil), and each peer's
+/// reciprocal node goes without a second drop. Upstream's `AbstractConnectorBlock.useItemOn`
+/// shears branch (`removeNode(i, !player.isCreative())` then `removeNode(peer, false)`).
+///
+/// A connector that held no wire is upstream's `hasAnyConnection()` no-op. A peer that is unloaded
+/// or refuses the write keeps its edge — the network walk already ignores an edge its peer does
+/// not name back, as in the break path.
+fn brush_detach(
+  host: &mut dyn ServerHost,
+  level: LevelRef,
+  keys: Keys,
+  pos: Pos,
+  creative: bool,
+) -> bool {
+  let Some(saved) = saved_at(host, level, keys, pos) else {
+    return false;
+  };
+  if saved.kind.wire_node().is_none() {
+    return false;
+  }
+  let wires = saved_wires(&saved.nbt);
+  if wires.is_empty() {
+    return false;
+  }
+  let plan = brush_plan(&wires, !creative);
+
+  // The connector is not broken: clear its own nodes as upstream's `removeNode` does, so it reads
+  // `links []` while the block and its other saved data stay exactly where they are.
+  let mut here = Compound::new();
+  store_wires(&mut here, &[]);
+  if let Some(entity) = host.block_entity(level, pos) {
+    let _ = entity.merge_data(host, here);
+  }
+
+  for (id, count) in &plan.drops {
+    let item = mod_api::Identifier::parse(id)
+      .ok()
+      .and_then(|id| host.item_key(&id));
+    if let Some(stack) = item.and_then(|item| ItemStack::new(item, *count)) {
+      let _ = level.pop_resource(host, pos, stack);
+    }
+  }
+
+  for peer in &plan.peers {
+    let Some(saved) = saved_at(host, level, keys, *peer) else {
+      continue;
+    };
+    let links = saved_wires(&saved.nbt);
+    if !links.iter().any(|link| link.pos == pos) {
+      continue;
+    }
+    let kept = links_without(&links, pos);
+    let mut data = Compound::new();
+    store_wires(&mut data, &kept);
+    let _ = host
+      .block_entity(level, *peer)
+      .is_some_and(|entity| entity.merge_data(host, data).is_ok());
+  }
+  true
+}
+
 /// A player broke one of our wire blocks: its wires drop where it stood (upstream's
 /// `playerWillDestroy` → `dropWires(level, !player.isCreative())`) and every peer lets go of it
 /// (the block entity's `remove()` clears the reciprocal node without a second drop).
@@ -3149,15 +3245,16 @@ fn run_network(
 
 // --- the commands ---------------------------------------------------------
 
-/// The six usages `/createaddition` declares. The optional `tag:word` is the harness's marker:
+/// The seven usages `/createaddition` declares. The optional `tag:word` is the harness's marker:
 /// the reply names it, so a line from an earlier command cannot be read as this one's answer.
-pub(crate) fn command_usages() -> [&'static str; 6] {
+pub(crate) fn command_usages() -> [&'static str; 7] {
   [
     "createaddition info <pos:block_pos> [tag:text]",
     "createaddition energy <pos:block_pos> <amount:integer> [tag:text]",
     "createaddition link <pos:block_pos> <pos2:block_pos> <wire:word> [tag:text]",
     "createaddition unlink <pos:block_pos> <pos2:block_pos> [tag:text]",
     "createaddition mode <pos:block_pos> <mode:word> [tag:text]",
+    "createaddition brush <pos:block_pos> [tag:text]",
     "createaddition signals [tag:text]",
   ]
 }
@@ -3727,6 +3824,30 @@ fn unlink_blocks(host: &mut dyn ServerHost, level: LevelRef, keys: Keys, a: Pos,
   }
 }
 
+/// `/createaddition brush <pos>`: the jar's shears detach, exposed as an operator command because
+/// Create's brush/wrench is not installed here (the same stand-in route as `/mode`). The reply's
+/// word is asserted by the harness so the drop is proved by the ground items, not by this text.
+pub(crate) fn command_brush(host: &mut dyn ServerHost, command: &CommandInvocation) {
+  let tag = tag_of(command);
+  let Some(pos) = command_pos(command) else {
+    feedback(host, "Usage: /createaddition brush <x> <y> <z>");
+    return;
+  };
+  let Some(level) = command_level(host) else {
+    feedback(host, "No level to write.");
+    return;
+  };
+  let Some(keys) = Keys::resolve(host) else {
+    return;
+  };
+  let answer = if brush_detach(host, level, keys, pos, false) {
+    "Wires detached."
+  } else {
+    "No wires to detach."
+  };
+  feedback(host, &reply(tag, answer.to_owned()));
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -4057,6 +4178,11 @@ mod tests {
     assert_eq!(level_of("createaddition energy"), 2);
     assert_eq!(level_of("createaddition link"), 2);
     assert_eq!(level_of("createaddition unlink"), 2);
+    assert_eq!(
+      level_of("createaddition brush"),
+      2,
+      "a write that drops items"
+    );
     assert_eq!(level_of("createaddition mode"), 0, "a player control");
     assert_eq!(level_of("createaddition info"), 0, "a player readout");
   }
@@ -5159,6 +5285,63 @@ mod tests {
     assert_eq!(
       break_stacks(&[kind_wire([1, 0, 0], 0, Laying::Copper)], true),
       vec![(Laying::Copper, 4)]
+    );
+  }
+
+  // --- the brush (shears) detach path --------------------------------------
+
+  #[test]
+  fn a_brush_detaches_a_festive_wire_as_four_copper_wires_and_clears_its_peer() {
+    // Upstream's shears path drops `type.getDrop()` on the ground and takes the peer's reciprocal
+    // node out: a festive wire's drop is copper's four, and the peer's `links []` is what the
+    // in-game leg reads back.
+    let wires = vec![kind_wire([12, 101, 0], 0, Laying::Festive)];
+    assert_eq!(
+      brush_plan(&wires, true),
+      BrushPlan {
+        drops: vec![("createaddition:copper_wire", 4)],
+        peers: vec![[12, 101, 0]],
+      },
+      "a detached festive wire drops four copper wires and clears its peer"
+    );
+  }
+
+  #[test]
+  fn a_brush_on_an_empty_connector_does_nothing() {
+    // Upstream guards the shears path with `wireNode.hasAnyConnection()`: an empty connector falls
+    // through to the super call, so nothing drops and no peer is touched.
+    assert_eq!(
+      brush_plan(&[], true),
+      BrushPlan {
+        drops: Vec::new(),
+        peers: Vec::new(),
+      },
+      "a brush on an empty connector drops nothing and clears nothing"
+    );
+  }
+
+  #[test]
+  fn a_brush_in_creative_takes_the_wire_out_but_drops_nothing() {
+    // `removeNode(i, !player.isCreative())`: the creative branch still detaches (and still clears
+    // the peer) but adds no wire to the level's drop cache.
+    let wires = vec![
+      kind_wire([1, 101, 0], 0, Laying::Copper),
+      kind_wire([2, 101, 0], 1, Laying::Copper),
+    ];
+    assert_eq!(
+      brush_plan(&wires, false),
+      BrushPlan {
+        drops: Vec::new(),
+        peers: vec![[1, 101, 0], [2, 101, 0]],
+      },
+      "a creative brush drops no items but still clears both peers"
+    );
+    // The non-creative plan for the same rig resolves the copper wire's id, so the creative case is
+    // not vacuous and the id the ground items use is pinned beside the drop count.
+    assert_eq!(
+      brush_plan(&wires, true).drops,
+      vec![("createaddition:copper_wire", 8)],
+      "two detached copper wires are one stack of eight"
     );
   }
 

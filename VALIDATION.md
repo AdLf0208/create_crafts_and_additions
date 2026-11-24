@@ -1,4 +1,52 @@
-# Validation — Create Crafts & Additions slices 1–16
+# Validation — Create Crafts & Additions slices 1–17
+
+## 0.2.16 — the brush wire drop (Create's shears path)
+
+Pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (nightly 2026-11-20), mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`; every cargo/package step inside one
+`ports/tools/build-slot.sh` lease (`CARGO_INCREMENTAL=0`, no `--target-dir`), **no `BUILD_LOCAL=1`**
+— the far runner compiled both the crate and the package. In-game legs: the launcher-built game tag
+`native-0a875da-0a3ff8304c16` (launcher 0.2.92), game legs local.
+
+The slice, in one line: the jar's shears detach (`AbstractConnectorBlock.useItemOn`) takes every
+wire out of a connector that `hasAnyConnection()`, drops **four of the wire's own kind on the ground**
+(a festive wire's four are **copper** wires), clears the peer's reciprocal node, and leaves the
+connector in the world with `links []`; an empty connector is a no-op. Create's brush is not
+installed, so the route is `/createaddition brush <pos>` (operator, survival). The red, the artefact
+table and the coverage are in `notes.md` § *Slice 17*.
+
+```
+red, stubbed brush_plan              121 passed, 2 failed  (brush-red.log)
+  a_brush_detaches_a_festive_wire_as_four_copper_wires_and_clears_its_peer
+    left: BrushPlan { drops: [], peers: [] }
+   right: BrushPlan { drops: [(Copper, 4)], peers: [[12, 101, 0]] }
+  a_brush_in_creative_takes_the_wire_out_but_drops_nothing
+tests                                123 passed, 0 failed  (sdk-test.log, regenerated for 0.2.16)
+clippy -D warnings                   0 warnings             (sdk-clippy.log)
+cargo fmt --check                     clean                  (sdk-fmt.log)
+two builds (rm Cargo.lock)           cmp-identical          (brush-build-1/2.log)
+check                                0.2.16, 208811 B       (brush-check.log)
+fits pin / other build               exit 2 / exit 2        (brush-fits-pin/other.log)
+launcher build                       Compiling createaddition (1 of 1)  (brush-launcher-build.log)
+launcher patch line                  2 functions patched by 2 mixins (brush-launcher-patch.log)
+package verifier                     1/1                    (verify-sdk-package.log)
+```
+
+Deliverable: `createaddition.hmod`, **208,811 B**, SHA-256
+`f3981a6c299c0fa5d46b01ffc8a57a6afb4a2be30a88611e018dfde1c1884df8`, 127 entries, no packed
+`Cargo.lock`, `src/runtime.rs` byte-identical (`03721ca4…f962`).
+
+```
+e2e-brush-default.log               PASS + EXIT:0
+  festive wire -> links [] on both ends; exactly 4 ground createaddition:copper_wire entities
+  empty connector -> No wires to detach.; 0 ground wires
+e2e-brush-selftest.log              FAIL + EXIT:1   (BRUSH_SELFTEST=brush inverts the empty count)
+e2e-brush-selftest-four.log         FAIL + EXIT:1   (BRUSH_SELFTEST=1 inverts the four-count)
+e2e-brush-control.log               FAIL + EXIT:1   (no package: createaddition:connector unknown)
+e2e-brush-suite.log                 PASS + EXIT:0   (the whole A-M suite, every earlier family green)
+e2e-drop-default-0.2.16.log         PASS + EXIT:0   (0.2.10's break-drop leg still green)
+check-e2e-logs.py --strict        logs=76 ok=76 missing-exit=0 bad-exit=0
+```
 
 ## 0.2.15 — the held-wire preview (`clientRenderHeldWire`)
 

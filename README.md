@@ -52,7 +52,10 @@ Each block drops itself when mined with a pickaxe (its own 26.3 loot table, and 
   spool of its own kind, so a festive link hands back a festive spool. **Breaking a connector drops
   its wires where it stood** — four of each wire's own kind, and a festive wire's four are copper
   wires, as the jar's `WireType.FESTIVE` says — while its peers let go of it and nothing drops to a
-  creative player. `createaddition:iron_wire`
+  creative player. **Brushing a connector** with Create's brush (the jar's shears path, exposed here
+  as `/createaddition brush <pos>`) detaches its wires the same way: the block stays, its `links []`
+  are cleared, and each wire drops on the ground — four of its own kind, a festive wire's four being
+  copper — instead of coiling onto a spool; an empty connector is a no-op. `createaddition:iron_wire`
   is carried because 1.7.2 registers the item, but upstream comments out its wire kind and its
   spool, so it lays nothing here either.
 - Every tick after the level's own, each wire network moves FE: a pull connector draws up to
@@ -103,8 +106,8 @@ Each block drops itself when mined with a pickaxe (its own 26.3 loot table, and 
 
 ## Commands
 
-`/createaddition info|energy|link|unlink|mode|signals …` are the harness's readout and the controls
-the GUI and Create's wrench would give a player. Every usage takes an optional trailing `tag:word`,
+`/createaddition info|energy|link|unlink|mode|brush|signals …` are the harness's readout and the
+controls the GUI and Create's wrench/brush would give a player. Every usage takes an optional trailing `tag:word`,
 which the reply repeats as ` [#tag]` so a harness can tell answers apart. The readout text is
 byte-identical to 0.1.0's, so the scenario's existing assertions still match; `signals` is newer and
 prints `answers=<n> dimensions=<dim>:<n>,… pending=<n>` — how many comparator answers the mod holds
@@ -125,7 +128,7 @@ not treated as an orphan; only a support that goes away takes its block.
 ## Layout
 
 ```
-horizon-mod.toml               the only manifest and identity: id, version 0.2.15, api 0.2, [native]
+horizon-mod.toml               the only manifest and identity: id, version 0.2.16, api 0.2, [native]
 Cargo.toml                     one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/rustfmt.toml               tab_spaces = 2, the campaign's style (a root one is refused)
 src/lib.rs                     the one impl Hooks: register, level_tick_post, the three lifecycle clears, commands

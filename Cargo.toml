@@ -8,10 +8,10 @@
 #
 # Cargo's name and version are not the mod's identity: horizon-mod.toml is.
 name = "createaddition"
-version = "0.2.15"
+version = "0.2.16"
 edition = "2024"
 license = "MIT"
-description = "Create Crafts & Additions for Horizon: an FE connector/wire/accumulator network, the accumulator multiblock and its comparator output, the redstone relay, the small light connector, the creative generator, the festive/iron wire items, the wires a broken connector drops, the blocks the level removes when their support is broken, the block/chunk/level clears of the accumulator's comparator answers, and the client half: wires drawn on the jar's catenary and shaded by the jar's lightmap, the held spool's wire previewed from the selected node to the player, and the accumulator's gauge needle swung by its fill"
+description = "Create Crafts & Additions for Horizon: an FE connector/wire/accumulator network, the accumulator multiblock and its comparator output, the redstone relay, the small light connector, the creative generator, the festive/iron wire items, the wires a broken connector drops, the blocks the level removes when their support is broken, the brush/shears detach that drops a connector's wires on the ground instead of coiling them onto spools, the block/chunk/level clears of the accumulator's comparator answers, and the client half: wires drawn on the jar's catenary and shaded by the jar's lightmap, the held spool's wire previewed from the selected node to the player, and the accumulator's gauge needle swung by its fill"
 publish = false
 
 [lib]

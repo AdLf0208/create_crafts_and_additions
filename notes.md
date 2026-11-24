@@ -11,8 +11,8 @@ rewrite, see `FINDINGS.md`).
 **LOCAL-ONLY** until the maintainer approves publishing (ARCHITECTURE.md §8).
 MIT is licence rank 0 (permissive); the approval is still required.
 
-Status: **slice 16 implemented and delivered as a flat SDK package (mod API 0.2), version
-0.2.15** — the two connectors, wire links and the modular accumulator, with the jar's rates and
+Status: **slice 17 implemented and delivered as a flat SDK package (mod API 0.2), version
+0.2.16** — the two connectors, wire links and the modular accumulator, with the jar's rates and
 connection rules, plus the **redstone relay** that bridges one wire network into another while
 powered, the **small light connector** whose lamp draws 1 FE a tick and lights while its network
 pays it, the accumulator's **comparator output** (the jar's fill fraction), the **creative
@@ -34,7 +34,9 @@ clears, § [`## Slice 12 — the lifecycle clears (0.2.11)`](#slice-12--the-life
 0.2.14 the wire renderer's lightmap, §
 [`## Slice 15 — the wire renderer's lightmap (0.2.14)`](#slice-15--the-wire-renderers-lightmap-0214);
 0.2.15 the held-wire preview, §
-[`## Slice 16 — the held-wire preview (0.2.15)`](#slice-16--the-held-wire-preview-0215).) The
+[`## Slice 16 — the held-wire preview (0.2.15)`](#slice-16--the-held-wire-preview-0215);
+0.2.16 the brush wire drop, §
+[`## Slice 17 — the brush wire drop (0.2.16)`](#slice-17--the-brush-wire-drop-0216).) The
 0.1.0 `.hnmod` was retired by Horizon's mod-API merge (#16941); the migration is
 [`## Migration to the SDK format`](#migration-to-the-sdk-format), and the 0.1.0 in-game evidence
 stays historical (`## Gaps`).
@@ -3558,7 +3560,7 @@ proved in the same log by `/createaddition link` + the parsed `info` reply
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
 
-## Next slice
+## Next slice (0.2.15's proposal — now closed by slice 17 below)
 
 The goggles-style readout, the mode wrench and the `PhysicsBlock`/display-link source remain
 **blocked**: they need Create's mod-to-mod API, which a package cannot reach. The brush wire drop is
@@ -3571,4 +3573,182 @@ concrete in-game assertion: give a connector one festive wire, detach it with th
 read the connector's `links []` plus exactly four `createaddition:copper_wire` items on the ground
 in the End arena; a control with an empty connector must drop 0, and `SELFTEST=brush` must invert
 one count and end `EXIT:1`.
+
+---
+
+## Slice 17 — the brush wire drop (0.2.16)
+
+### The slice, the gap line and the tier fit
+
+From this file's 0.2.15 `## Next slice` and the 0.2.14/0.2.15 slice notes:
+
+> *"the brush wire drop stays on the level path"* — a brush that detaches a wire drops it on the
+> ground (four of the wire's own kind, copper's for a festive wire) instead of coiling it onto a
+> spool.
+
+**Choice.** This is the last level-path family the port could still implement: every wire could be
+*laid*, *coiled back* (empty spool) and *lost on a break* (0.2.10), but the jar's brush/shears detach
+— which takes the wires out while the connector stays in the world — had no route. It is a `deep`
+family (saved block-entity links plus the existing level write), and it deliberately does **not**
+touch the two `[[native.mixin]]` rows: the launcher re-applied both unchanged (`2 functions patched
+by 2 mixins`). The goggles/readout/display source stay **blocked** on Create's mod-to-mod API; no
+attempt was made at them.
+
+**Tier fit.** `deep`: one more command/Part-side write over the saved links, the jar's drop table
+already carried by 0.2.10, and `LevelRef::pop_resource` for the ground items. No new block, item,
+renderer or mixin row.
+
+### The drop rule, read from the artefact before implementing
+
+Repo `658a390b8ff4daa17013e9447b29949330c8a42a` (analysis only; clean-room rewrite):
+
+| file | what it says |
+|---|---|
+| `blocks/connector/base/AbstractConnectorBlock.java:89-113` | `useItemOn`: when the held stack is `Items.SHEARS` **and** the block entity `hasAnyConnection()`, it gathers every `LocalNode` and its remote index, calls `removeNode(i, !player.isCreative())` on this connector, then `remoteNodes[i].removeNode(remoteIndices[i], false)` on each peer; an empty connector falls through to `super` (a no-op for our block) |
+| `energy/IWireNode.java:416-421` | `dropWire(Level, LocalNode)`: `type.getDrop()` — **four items of the wire's own kind**, dropped at the node's own block (`Containers.dropContents`) |
+| `energy/WireType.java:8-13` | `COPPER` → `copper_wire ×4`, `GOLD` → `gold_wire ×4`, `ELECTRUM` → `electrum_wire ×4`, `FESTIVE` → **`copper_wire ×4`** (the festive wire's drop is copper's; only its *source* drop is a festive spool) |
+| `blocks/connector/base/AbstractConnectorBlockEntity.java:138-150` | `removeNode(index, dropWire)`: clears the local node and peer cache, then adds the old node to `wireCache` only when `dropWire` — the creative branch still detaches but drops nothing |
+| `energy/IWireNode.java:423-443` | `dropWires(Level, boolean)` aggregates one stack per `WireType` index; with a single wire the stack is exactly four |
+
+So the rule is **four of the wire's own drop at the connector's block** (a festive wire drops
+**copper's four**), the peer's reciprocal node goes with no second drop, the connector stays in the
+world with `links []`, and an empty connector does nothing. The brief's "four copper wires" agrees
+with the artefact; where they disagree the artefact wins, and here they do not.
+
+**Route at the pin.** Create's brush/shears item is not installed, so the jar's tool interaction is
+exposed as `/createaddition brush <pos>` — the same command stand-in the port already uses for
+Create's wrench (`/mode`). It is an operator write (level 2) like `link`/`unlink`/`energy`, and the
+harness drives it with `ctl chat`, where `perform_command` hears it. The in-game assertion reads the
+**ground item entities**, not this command's reply text.
+
+### Red → green (TDD)
+
+Three rules were written as failing tests against the stub (`brush_plan` returned no drops and no
+peers) and watched fail. `brush-red.log`, verbatim:
+
+```
+thread 'network::tests::a_brush_detaches_a_festive_wire_as_four_copper_wires_and_clears_its_peer' (626856) panicked at src/network.rs:5196:5:
+assertion `left == right` failed: a detached festive wire drops four copper wires and clears its peer
+  left: BrushPlan { drops: [], peers: [] }
+ right: BrushPlan { drops: [(Copper, 4)], peers: [[12, 101, 0]] }
+thread 'network::tests::a_brush_in_creative_takes_the_wire_out_but_drops_nothing' (626857) panicked at src/network.rs:5228:5:
+assertion `left == right` failed: a creative brush drops no items but still clears both peers
+  left: BrushPlan { drops: [], peers: [] }
+ right: BrushPlan { drops: [], peers: [[1, 101, 0], [2, 101, 0]] }
+test result: FAILED. 121 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+The third test (`a_brush_on_an_empty_connector_does_nothing`) passed against the stub as expected
+(the stub's empty result happens to be right for empty input); the first red run also caught my own
+type error (`peers: vec![12, 101, 0]`), fixed before the real red above. Green: **123 passed, 0
+failed** (`sdk-test.log`, regenerated for 0.2.16; 120 → 123: three new tests plus the `brush`
+command's declaration level). The rule resolves the drop **item id** (`wire_drop`) in the plan, so
+the festive→copper mapping is asserted beside the count, not left to the glue.
+
+### The 0.2.16 ladder
+
+| Step | Command | Result |
+|---|---|---|
+| red | `cargo test --offline` against the stub | **121 passed, 2 failed**, exit 101 (`brush-red.log`) |
+| tests | `cargo test --offline` | **123 passed**, 0 failed (`sdk-test.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| formatting | `cargo fmt --check` | clean (`sdk-fmt.log`) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` | exit 0, no `BUILD_LOCAL` — the far runner compiled it (`brush-build-1.log`) |
+| package, second build | the same again | **byte-identical** (`cmp`, `brush-build-2.log`) |
+| registry check | `cargo horizon-mod check createaddition.hmod` | 0.2.16, 208,811 B (`brush-check.log`) |
+| fits, pin | `… fits … --build 0a875da…` | **"made for exactly one build … fits doesn't apply"**, exit 2 by design (`brush-fits-pin.log`) |
+| fits, other build | `… --build 0b14f8a…` | the same refusal, exit 2 (`brush-fits-other.log`) |
+| launcher build | `launcher-game.sh build createaddition` | `Compiling createaddition (1 of 1)`, tag `native-0a875da-0a3ff8304c16` (`brush-launcher-build.log`); the launcher's log: `Compiling createaddition: 5148 ms` and `Function replacement: 2 functions patched by 2 mixins, without rebuilding the game (copy 72 ms, horizon-mixins 303 ms, compile 4328 ms, total 4704 ms)` (`brush-launcher-patch.log`); identity `0a875da91dbb… createaddition 0.2.16 1.99.1` |
+| package verifier | `python3 ports/tools/verify-sdk-package.py createaddition` | **1/1**, incl. `package matches the tree` (`verify-sdk-package.log`) |
+| data shape / carry / licence | the three existing tools | 6/6 26.3, jar carry matches, upstream notice verbatim |
+
+The two `fits` refusals are the route's price, unchanged since 0.2.9; the substitute is the launcher
+build above, which recompiled the mod and re-applied both unchanged mixin rows. The stale 0.2.15
+`native-0a875da-88074f377b2f` tag was removed after the build (only `…0a3ff8304c16` remains).
+
+Deliverable: **`createaddition.hmod`, 208,811 B, SHA-256
+`f3981a6c299c0fa5d46b01ffc8a57a6afb4a2be30a88611e018dfde1c1884df8`**, 127 entries, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f962`, packed too).
+
+### In-game (`e2e-brush-default.log`, `PASS` + `EXIT:0`)
+
+A dedicated leg (`tools/e2e-brush.sh`): the End arena (no ambient item entities), ambient items
+cleared before each phase, item entities read with `.pos` (not `.position`) and the count parsed
+with `jq`. Every `ctl` reply is tagged. The decisive transcript:
+
+```
+== seed one festive wire between 400 and 404, then brush 400 ==
+  wired connector: Connector at 400,101,0: mode none, buffer 0/1000 FE, links [(404,101,0)/0/festive], pool 0/0, demand 0, t=109
+  brushed connector: Connector at 400,101,0: mode none, buffer 0/1000 FE, links [], pool 0/0, demand 0, t=130
+  peer: Connector at 404,101,0: mode none, buffer 0/1000 FE, links [], pool 0/0, demand 0, t=138
+  ground createaddition:copper_wire after the brush: 4 (pos-filtered)
+== brush an empty connector at 408 (drops 0) ==
+  empty connector: Connector at 408,101,0: mode none, buffer 0/1000 FE, links [], pool 0/0, demand 0, t=163
+  ground createaddition:copper_wire after brushing the empty connector: 0
+PASS: a brush detaches one festive wire as exactly four ground createaddition:copper_wire items, leaves links [] on both connectors, and an empty connector drops 0
+```
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-brush-default.log` | `PASS` + `EXIT:0` | one festive wire → `links []` on both connectors and exactly **4** ground `createaddition:copper_wire` items; empty connector → **0**, and a `No wires to detach.` reply |
+| `e2e-brush-selftest.log` | `FAIL` + `EXIT:1` | `BRUSH_SELFTEST=brush` inverts the empty-connector count (0 < 1) |
+| `e2e-brush-selftest-four.log` | `FAIL` + `EXIT:1` | `BRUSH_SELFTEST=1` inverts the four-count (it is exactly 4) |
+| `e2e-brush-control.log` | `FAIL` + `EXIT:1` | a Nightly without the package cannot place `createaddition:connector`, so the four items come from this package |
+| `e2e-brush-suite.log` | `PASS` + `EXIT:0` | the whole A–M suite on 0.2.16: every earlier family unchanged |
+| `e2e-drop-default-0.2.16.log` | `PASS` + `EXIT:0` | 0.2.10's break-drop leg still green after the new command |
+
+`python3 ports/tools/check-e2e-logs.py createaddition-e2e --strict`:
+**logs=76 ok=76 missing-exit=0 bad-exit=0** — the 70 earlier logs stay green.
+
+Harness facts this slice cost: (1) `launcher-game.sh env` exports `CONTROL_GAME`, so a default leg
+must `unset CONTROL_GAME` or it silently runs the control (the first attempt did exactly that and
+failed for the right reason); (2) the launcher's shared `native/build.log` is overwritten by any
+concurrent native build, so it was copied in the same command as `launcher-game.sh build`; (3) a
+concurrent `native-build` by another port must finish before this one — the launcher refuses with
+`A native build or cache cleanup is running`, which was waited out in-turn, not retried in a loop
+that ends the turn.
+
+### Coverage added by this slice
+
+| family | status |
+|---|---|
+| brush detaches a wire without breaking the block | **tested** — the connector stays, reads `links []`; in game `Wires detached.` + parsed `links []` on both ends |
+| four items of the wire's own drop on the ground | **tested** — `brush_plan` resolves the drop id and count; in game exactly 4 `createaddition:copper_wire` entities at the connector's `.pos` |
+| a festive wire drops copper's four | **tested** — `a_brush_detaches_a_festive_wire_as_four_copper_wires_and_clears_its_peer`; in game the festive rig's four are copper |
+| an empty connector is a no-op | **tested** — `a_brush_on_an_empty_connector_does_nothing`; in game `No wires to detach.` and 0 ground wires |
+| creative brush takes the wire out and drops nothing | **tested** — `a_brush_in_creative_takes_the_wire_out_but_drops_nothing` (the `/brush` command is operator-only and always survival; this pins the pure rule) |
+| the peer lets go without a second drop | **tested** — the peer reads `links []` and the ground count is exactly 4, not 8 |
+| goggles-style readout, mode wrench, display source | **blocked(no-mod-to-mod-api)** — Create's mod-to-mod API is absent; not attempted |
+
+### Deviations of this slice (declared)
+
+1. **Create's brush/shears is exposed as a command**, not an item interaction. The jar's `Items.SHEARS`
+   branch in `useItemOn` needs Create's tool and the crosshair path; neither is installed here, and
+   the port's other tool-driven routes (`mode` for the wrench) are commands. `/createaddition brush
+   <pos>` is operator-only and always takes the survival (drop) branch, so the creative branch is
+   pinned by the unit test, not in game.
+2. **The drop uses `LevelRef::pop_resource`**, the SDK's "as a broken block drops it", with a random
+   offset within a quarter block of the connector — upstream's `Containers.dropContents` at the
+   block centre. The count and kind are identical; the exact positions differ (the leg's ±3-block
+   `.pos` filter covers both).
+3. **A peer that is unloaded or refuses the write keeps its edge** — as in 0.2.10's break path; the
+   network walk ignores an edge the peer does not name back, and the in-game peer is loaded.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port
+
+## Next slice
+
+The goggles-style readout, the mode wrench and the `PhysicsBlock`/display-link source stay
+**blocked**: they need Create's mod-to-mod API, which a package cannot reach (measured in
+`ports/_shared/external/create-horizon-architecture.md` §0, unchanged at this pin). No other family
+in the jar is both inside the `deep` tier and reachable through this port's API, so there is no workable
+slice left at `0a875da` and the port closes here. The next action for the orchestrator is a **new
+pin's repin audit**: check whether a newer SDK stamps a mod-to-mod capability surface (a typed
+read of another native mod's published state) that would unblock the goggles/display source; if it
+does, a re-verification slice would replace the documented `blocked(no-mod-to-mod-api)` rows rather
+than starting a new port. A concrete assertion for such a slice, once unblocked, would be: place an
+accumulator, read the mod's published fill from a second block's readout and assert the parsed value
+matches `/createaddition info` at the same tick, with an unpowered/empty differential reading a
+different value.
 

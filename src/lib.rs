@@ -4,8 +4,9 @@
 //! moves energy between them at the end of the level's tick, the modular accumulator that
 //! feeds the blocks on its UP and DOWN faces, the redstone relay that bridges one wire
 //! network into another while its `powered` bit is set, the small light connector whose
-//! lamp draws 1 FE a tick from its network and lights while it is paid, and the creative
-//! generator that gives without limit and fills every neighbour each tick.
+//! lamp draws 1 FE a tick from its network and lights while it is paid, the creative
+//! generator that gives without limit and fills every neighbour each tick, and the brush/shears
+//! detach that drops a connector's wires on the ground instead of coiling them onto spools.
 //!
 //! The rules themselves live in [`runtime`], byte-identical to the retired bundle's `runtime.rs`
 //! and tested by `cargo test` without the game. [`network`] is the glue: the block entity Part,
@@ -148,8 +149,9 @@ impl Hooks for Mod {
     );
   }
 
-  /// `/createaddition info|energy|link|unlink|mode|signals`: the harness's readout and the controls
-  /// the GUI and Create's wrench would give a player (neither is in this slice).
+  /// `/createaddition info|energy|link|unlink|mode|brush|signals`: the harness's readout and the
+  /// controls the GUI and Create's wrench/shears would give a player (neither is installed here).
+  /// `brush` is the jar's shears detach path: wires drop on the ground, not onto a spool.
   fn register_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
     event.commands.extend(network::command_declarations());
   }
@@ -218,6 +220,7 @@ impl Hooks for Mod {
       ["createaddition", "link"] => network::command_link(host, event.command),
       ["createaddition", "unlink"] => network::command_unlink(host, event.command),
       ["createaddition", "mode"] => network::command_mode(host, event.command),
+      ["createaddition", "brush"] => network::command_brush(host, event.command),
       ["createaddition", "signals"] => {
         network::command_signals(host, event.command, &self.signals, &self.pending)
       }

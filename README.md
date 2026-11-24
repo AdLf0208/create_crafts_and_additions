@@ -121,7 +121,7 @@ not treated as an orphan; only a support that goes away takes its block.
 ## Layout
 
 ```
-horizon-mod.toml               the only manifest and identity: id, version 0.2.13, api 0.2, [native]
+horizon-mod.toml               the only manifest and identity: id, version 0.2.14, api 0.2, [native]
 Cargo.toml                     one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/rustfmt.toml               tab_spaces = 2, the campaign's style (a root one is refused)
 src/lib.rs                     the one impl Hooks: register, level_tick_post, the three lifecycle clears, commands

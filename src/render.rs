@@ -62,6 +62,29 @@ pub struct Wire {
   pub to: [f64; 3],
   /// Which wire it is.
   pub kind: WireKind,
+  /// The block/sky light at each end, as the level pass read it. The renderer interpolates this
+  /// along the wire the way the jar's `wirePart` does (`LightTexture` lightmap coordinates).
+  pub light: Light,
+}
+
+/// The light a wire is drawn under: block and sky light at its two block ends.
+///
+/// `block[i]`/`sky[i]` are the raw 0..15 levels the level pass read with `getBrightness`, for the
+/// wire's own block (`i = 0`) and its peer (`i = 1`). This is the data the jar's `wireRender`
+/// reads before calling `wirePart`; the per-segment interpolation happens in the renderer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Light {
+  pub block: [i32; 2],
+  pub sky: [i32; 2],
+}
+
+impl Light {
+  /// Fully lit, for callers that have no level to read (and for the wire unit tests that pin
+  /// geometry and colour independently of light).
+  pub const BRIGHT: Light = Light {
+    block: [15, 15],
+    sky: [15, 15],
+  };
 }
 
 /// One vertex the helper uploads: a clip-space position and an RGBA colour.
@@ -445,7 +468,16 @@ fn push_wire(out: &mut Vec<Vertex>, wire: &Wire, camera: [f64; 3], m: &[f32; 16]
     let part = step as f32 / SEGMENTS as f32;
     let point = add(start, along(delta, part, distance));
     let shade = if step % 2 == 0 { 0.7 } else { 1.0 };
-    let rgba = [base[0] * shade, base[1] * shade, base[2] * shade, 1.0];
+    // The jar's `wirePart` reads the interpolated lightmap coordinate at every piece and gives it
+    // to `wireVert`/`setLight`. Here the same per-piece light scales the vertex colour: a wire in
+    // the dark keeps the jar's hue but loses brightness.
+    let lit = segment_light(wire.light, part);
+    let rgba = [
+      base[0] * shade * lit,
+      base[1] * shade * lit,
+      base[2] * shade * lit,
+      1.0,
+    ];
     if let Some((last, last_rgba)) = previous {
       for index in 0..4 {
         let a = add(last, outline[index]);
@@ -457,7 +489,7 @@ fn push_wire(out: &mut Vec<Vertex>, wire: &Wire, camera: [f64; 3], m: &[f32; 16]
     }
     previous = Some((point, rgba));
     if wire.kind.festive() {
-      push_light(out, m, start, delta, distance, step);
+      push_light(out, m, start, delta, distance, step, lit);
     }
   }
 }
@@ -471,6 +503,7 @@ fn push_light(
   delta: [f32; 3],
   distance: f32,
   step: usize,
+  lit: f32,
 ) {
   const COLOURS: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
   if step == 0 || step == SEGMENTS || !step.is_multiple_of(3) {
@@ -479,7 +512,9 @@ fn push_light(
   let main = delta[0] + delta[1] + delta[2] > 0.0;
   let cycle = (step / 3) % 3;
   let colour = COLOURS[if main { 2 - cycle } else { cycle }];
-  let rgba = [colour[0], colour[1], colour[2], 1.0];
+  // The jar's festive `lights()` path is handed the same endpoint light values (`javap` 1059–1061),
+  // so a light string dims with the wire it hangs on.
+  let rgba = [colour[0] * lit, colour[1] * lit, colour[2] * lit, 1.0];
   let part = step as f32 / SEGMENTS as f32;
   let mut point = add(start, along(delta, part, distance));
   point[1] += LIGHT_Y_OFFSET;
@@ -546,6 +581,54 @@ pub fn vertex_bytes(vertices: &[Vertex]) -> Vec<u8> {
   bytes
 }
 
+/// A light level's denominator scalar: the jar's `getBrightness` uses `f = level / 15`.
+const LIGHT_LEVELS: f32 = 15.0;
+
+/// The jar's `Mth.lerp(part, from, to)` narrowed to an `int` by `f2i` — exactly what
+/// `WireNodeRenderer.wirePart` does for both light layers at each of its 24 pieces.
+pub fn light_lerp(part: f32, from: i32, to: i32) -> i32 {
+  (from as f32 + part * (to as f32 - from as f32)) as i32
+}
+
+/// The jar's `LightTexture.pack(block, sky)`: block light shifted 4, sky light shifted 20
+/// (the 1.21.1 client's `LightTexture.pack`, read from its bytecode as `a(int, int)`).
+pub fn light_pack(block: i32, sky: i32) -> u32 {
+  ((block as u32) << 4) | ((sky as u32) << 20)
+}
+
+/// Vanilla's `LightTexture.getBrightness(dimensionType, level)` for a dimension with ambient
+/// light 0 (the End, where the wire rig lives): `f = level / 15`, `f / (4 - 3f)`, lerped to 1.
+/// This is the curve the lightmap texture samples; it is not a screenshot-guessed dim factor.
+pub fn light_brightness(level: i32) -> f32 {
+  let f = (level.clamp(0, 15) as f32) / LIGHT_LEVELS;
+  f / (4.0 - 3.0 * f)
+}
+
+/// The brightness of one lightmap texel, from the packed block/sky light: block and sky
+/// contributions added as `LightTexture` fills the texture, clamped, then the texture's gamma
+/// (`notGamma = 1 - (1-v)^3`) and its 0.04 lerp to the 0.75 grey floor. A stride toward the
+/// jar's own lightmap, expressed as a scalar the wire shader can multiply into its colour.
+pub fn lightmap_factor(packed: u32) -> f32 {
+  let block = ((packed >> 4) & 0xffff) as i32;
+  let sky = ((packed >> 20) & 0xffff) as i32;
+  // `LightTexture` fills the texel with the block-light colour plus the sky-light colour, then
+  // clamps it to one. Both curves come from `getBrightness` above. No-sky dimensions (End/Nether)
+  // have sky factor 0, which the level pass expresses by publishing a zero sky level.
+  let combined = (light_brightness(block) + light_brightness(sky)).min(1.0);
+  // The texture's `notGamma` (`1 - (1-v)^3`), then its 0.04 lerp toward the 0.75 grey floor: even
+  // at zero light a texel keeps a faint value, which is why a dark wire is dim rather than absent.
+  let gamma = 1.0 - (1.0 - combined).powi(3);
+  (gamma * 0.96 + 0.03).min(1.0)
+}
+
+/// The dimming a wire vertex at `part` of its span gets: interpolate each light layer exactly as
+/// the jar does, pack it as the jar does, then read its lightmap brightness.
+pub fn segment_light(light: Light, part: f32) -> f32 {
+  let block = light_lerp(part, light.block[0], light.block[1]);
+  let sky = light_lerp(part, light.sky[0], light.sky[1]);
+  lightmap_factor(light_pack(block, sky))
+}
+
 fn colour(rgb: [u8; 3]) -> [f32; 3] {
   [
     f32::from(rgb[0]) / 255.0,
@@ -592,7 +675,12 @@ mod tests {
   }
 
   fn wire(from: [f64; 3], to: [f64; 3], kind: WireKind) -> Wire {
-    Wire { from, to, kind }
+    Wire {
+      from,
+      to,
+      kind,
+      light: Light::BRIGHT,
+    }
   }
 
   #[test]
@@ -609,14 +697,17 @@ mod tests {
       &straight(),
     );
     let base = colour([78, 37, 30]);
+    let lit = lightmap_factor(light_pack(15, 15));
     for vertex in &vertices {
-      let shade = vertex.rgba[0] / base[0];
+      // The wire keeps the jar's hue; the only variation is the 0.7 alternating shade and the
+      // (uniform) lightmap factor a fully lit wire carries.
+      let shade = vertex.rgba[0] / (base[0] * lit);
       assert!(
-        (shade - 1.0).abs() < 1e-6 || (shade - 0.7).abs() < 1e-6,
+        (shade - 1.0).abs() < 1e-5 || (shade - 0.7).abs() < 1e-5,
         "a copper wire is drawn in copper's colour, shaded only by the jar's 0.7: {vertex:?}"
       );
-      assert!((vertex.rgba[1] / base[1] - shade).abs() < 1e-6);
-      assert!((vertex.rgba[2] / base[2] - shade).abs() < 1e-6);
+      assert!((vertex.rgba[1] / (base[1] * lit) - shade).abs() < 1e-5);
+      assert!((vertex.rgba[2] / (base[2] * lit) - shade).abs() < 1e-5);
       assert_eq!(vertex.rgba[3], 1.0);
     }
   }
@@ -693,11 +784,12 @@ mod tests {
       festive.len(),
       copper.len()
     );
-    // The lights are the jar's red, green and blue, at full brightness.
+    // The lights are the jar's red, green and blue, at the fully lit wire's brightness.
+    let lit = lightmap_factor(light_pack(15, 15));
     for wanted in [
-      [1.0, 0.0, 0.0, 1.0],
-      [0.0, 1.0, 0.0, 1.0],
-      [0.0, 0.0, 1.0, 1.0],
+      [lit, 0.0, 0.0, 1.0],
+      [0.0, lit, 0.0, 1.0],
+      [0.0, 0.0, lit, 1.0],
     ] {
       assert!(
         festive.iter().any(|v| v.rgba == wanted),
@@ -936,6 +1028,77 @@ mod tests {
       2 * 6,
       "the east and south faces look at this camera; the far two are hidden by the block: {}",
       vertices.len()
+    );
+  }
+
+  /// The mean brightness of a draw's vertices — what a screenshot would measure on the wire's
+  /// own coloured pixels, before the frame's tone mapping.
+  fn mean_luma(vertices: &[Vertex]) -> f32 {
+    vertices
+      .iter()
+      .map(|v| (v.rgba[0] + v.rgba[1] + v.rgba[2]) / 3.0)
+      .sum::<f32>()
+      / vertices.len() as f32
+  }
+
+  #[test]
+  fn the_jars_lightmap_packs_and_interpolates_block_and_sky_light() {
+    // `WireNodeRenderer.wirePart`: `Mth.lerp(part, start, end)` narrowed by `f2i`, then
+    // `LightTexture.pack(block, sky) = (block << 4) | (sky << 20)`.
+    assert_eq!(light_lerp(0.0, 0, 15), 0);
+    assert_eq!(light_lerp(1.0, 0, 15), 15);
+    assert_eq!(
+      light_lerp(0.5, 0, 15),
+      7,
+      "Mth.lerp(0.5, 0, 15) is 7.5, floored"
+    );
+    assert_eq!(light_pack(7, 3), (7 << 4) | (3 << 20));
+  }
+
+  #[test]
+  fn the_lightmap_brightness_follows_the_jars_get_brightness_curve() {
+    // `LightTexture.getBrightness`: f = level/15, f/(4-3f), lerped from ambient 0 to 1.
+    assert_eq!(light_brightness(0), 0.0);
+    assert_eq!(light_brightness(15), 1.0);
+    let mid = light_brightness(7);
+    assert!(
+      (mid - (7.0 / 15.0) / (4.0 - 3.0 * 7.0 / 15.0)).abs() < 1e-6,
+      "light 7 must read the jar's curve, got {mid}"
+    );
+    assert!(
+      (0..15).all(|l| light_brightness(l) < light_brightness(l + 1)),
+      "the curve is monotonic in the light level"
+    );
+  }
+
+  #[test]
+  fn a_wire_in_the_dark_is_dimmer_than_one_in_daylight() {
+    // The gap line: "a wire in a dark room is as bright as one in daylight". A carried lightmap
+    // must make the dark frame measurably dimmer while keeping the wire's own colour.
+    let lit = frame(
+      &[wire([0.0, 0.0, 0.0], [4.0, 0.0, 0.0], WireKind::Festive)],
+      [0.0; 3],
+      &straight(),
+    );
+    let mut dark_wire = wire([0.0, 0.0, 0.0], [4.0, 0.0, 0.0], WireKind::Festive);
+    dark_wire.light = Light {
+      block: [0, 0],
+      sky: [0, 0],
+    };
+    let dark = frame(&[dark_wire], [0.0; 3], &straight());
+    let lit_mean = mean_luma(&lit);
+    let dark_mean = mean_luma(&dark);
+    assert!(
+      dark_mean < lit_mean * 0.5,
+      "a wire in the dark must be much dimmer: dark mean {dark_mean}, lit mean {lit_mean}"
+    );
+    assert!(
+      (0.001..=0.5).contains(&dark_mean),
+      "a lightless wire keeps the lightmap's faint grey floor, not zero and not full: {dark_mean}"
+    );
+    assert!(
+      lit_mean > 0.1,
+      "a fully lit wire keeps the jar's own colour brightness: {lit_mean}"
     );
   }
 

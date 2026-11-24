@@ -23,7 +23,7 @@ use mod_api::{
   BlockKey, BlockPart, Command, CommandArgumentValue, CommandInvocation, Compound, Direction,
   ENERGY, HasAnalogOutputEvent, Host, HostBlockStates, HostTransaction, InteractionResult, ItemKey,
   ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef, LevelSide, LevelTicksHost,
-  LightEmissionEvent, ModEnergyBuffer, NeighborChangedEvent, NeighbourUpdate,
+  LightEmissionEvent, LightLayer, ModEnergyBuffer, NeighborChangedEvent, NeighbourUpdate,
   OnBlockStateChangeEvent, OnDestroyedByPlayerEvent, ServerHost, StateConstraint,
   StateForPlacementEvent, SupportType, Tag, Text, UseItemOnEvent, move_energy,
 };
@@ -799,6 +799,30 @@ fn attach_point(host: &dyn Host, level: LevelRef, pos: Pos, kind: Kind, peer: Po
 /// The renderer is client-side and a single-player world's level ticks in this process, so the
 /// set the server holds here is the set the client draws. A dedicated server's client has no
 /// copy of it (this port syncs no block entity data), which is declared in `notes.md`.
+/// The light the renderer needs for a wire, read the way the jar's `wireRender` reads it:
+/// `getBrightness(LIGHTLAYER, blockPos)` at the wire's own block and at its peer's. A dimension
+/// with no sky (the End, the Nether) contributes no sky light to the lightmap — the jar's
+/// `LightTexture` uses sky factor 0 there — so its sky levels are zeroed at the source rather than
+/// guessed in the shader. An unread level (a chunk that just unloaded) reads as full bright, which
+/// is what the jar sees for a block whose level is gone: no dark wire left behind.
+fn wire_light(host: &dyn Host, level: LevelRef, from: Pos, to: Pos) -> render::Light {
+  let read = |layer, pos: Pos| {
+    level
+      .brightness(host, layer, [pos[0], pos[1], pos[2]])
+      .unwrap_or(15)
+  };
+  let dimension = level.dimension_id();
+  let no_sky = dimension.ends_with("the_end") || dimension.ends_with("the_nether");
+  render::Light {
+    block: [read(LightLayer::Block, from), read(LightLayer::Block, to)],
+    sky: if no_sky {
+      [0, 0]
+    } else {
+      [read(LightLayer::Sky, from), read(LightLayer::Sky, to)]
+    },
+  }
+}
+
 fn publish_wires(host: &mut dyn ServerHost, level: LevelRef, blocks: &[(Pos, Saved)]) {
   let peers: BTreeMap<Pos, Kind> = blocks
     .iter()
@@ -824,6 +848,7 @@ fn publish_wires(host: &mut dyn ServerHost, level: LevelRef, blocks: &[(Pos, Sav
         from,
         to,
         kind: wire.wire.drawn(),
+        light: wire_light(host, level, *pos, wire.pos),
       });
     }
   }

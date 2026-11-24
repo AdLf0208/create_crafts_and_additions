@@ -1,4 +1,44 @@
-# Validation — Create Crafts & Additions slices 1–14
+# Validation — Create Crafts & Additions slices 1–15
+
+## 0.2.14 — the wire renderer's lightmap (the missing wire half)
+
+Pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (nightly 2026-11-20), mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`; every cargo/package step inside one
+`ports/tools/build-slot.sh` lease (`CARGO_INCREMENTAL=0`, no `--target-dir`), with `BUILD_LOCAL=1`
+for the package and e2e steps. In-game legs: the launcher-built game tag
+`native-0a875da-accae66760b3` (launcher 0.2.92).
+
+The slice, in one line: the jar's block/sky light reads at both wire ends, `Mth.lerp` per piece and
+`LightTexture.pack`, carried into the 0.2.9 renderer's existing vertex pipeline; a wire in the dark
+is now dimmer than one in daylight. The bytecode, the red and the coverage are in `notes.md` §
+*Slice 15*.
+
+```
+red, stubbed lightmap factor       115 passed, 1 failed  (wire-lightmap-red.log)
+  a wire in the dark             dark mean 0.17042342, lit mean 0.17042342
+tests                             116 passed, 0 failed  (sdk-test.log, regenerated for 0.2.14)
+clippy -D warnings                0 warnings             (wire-lightmap-clippy.log)
+cargo fmt --check                 clean                  (wire-lightmap-fmt.log)
+two builds (rm Cargo.lock)        cmp-identical          (wire-lightmap-build-1/2.log)
+check                             0.2.14, 204033 B       (lightmap-check.log)
+fits pin / other build            exit 2 / exit 2        (lightmap-fits-*.log)
+launcher patch line               2 functions patched by 2 mixins (lightmap-launcher-patch.log)
+package verifier                  1/1                    (lightmap-verify-package.log)
+```
+
+Deliverable: `createaddition.hmod`, **204,033 B**, SHA-256
+`aee4697fc35b2f788a344805220fcc2ccc30a76ce8674e5d5d361854da12a098`, 127 entries, no packed
+`Cargo.lock`, `src/runtime.rs` byte-identical.
+
+```
+e2e-lightmap-default.log          PASS + EXIT:0
+  lit  wire box: 1901 green pixels, mean rgb(13, 53, 6)
+  dark wire box: 1901 green pixels, mean rgb(8, 33, 3)   (20 green levels lower)
+e2e-lightmap-selftest.log         FAIL + EXIT:1   (comparison inverted: 53 > 33)
+e2e-lightmap-negative.log         FAIL + EXIT:1   (wire removed: 0 green wire pixels)
+e2e-lightmap-control.log          FAIL + EXIT:1   (no package: createaddition:connector unknown)
+check-e2e-logs.py --strict        logs=66 ok=66 missing-exit=0 bad-exit=0
+```
 
 ## 0.2.13 — the accumulator's gauge readout (the client half)
 

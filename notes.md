@@ -11,8 +11,8 @@ rewrite, see `FINDINGS.md`).
 **LOCAL-ONLY** until the maintainer approves publishing (ARCHITECTURE.md §8).
 MIT is licence rank 0 (permissive); the approval is still required.
 
-Status: **slice 14 implemented and delivered as a flat SDK package (mod API 0.2), version
-0.2.13** — the two connectors, wire links and the modular accumulator, with the jar's rates and
+Status: **slice 15 implemented and delivered as a flat SDK package (mod API 0.2), version
+0.2.14** — the two connectors, wire links and the modular accumulator, with the jar's rates and
 connection rules, plus the **redstone relay** that bridges one wire network into another while
 powered, the **small light connector** whose lamp draws 1 FE a tick and lights while its network
 pays it, the accumulator's **comparator output** (the jar's fill fraction), the **creative
@@ -30,7 +30,9 @@ the comparator, § [`## Slice 6 — the accumulator's comparator output (0.2.6)`
 0.2.8 the festive spool; 0.2.9 the wire renderer; 0.2.10 the break-drop path; 0.2.11 the lifecycle
 clears, § [`## Slice 12 — the lifecycle clears (0.2.11)`](#slice-12--the-lifecycle-clears-0211);
 0.2.12 the support rule; 0.2.13 the accumulator's gauge needle, §
-[`## Slice 14 — the accumulator's gauge readout (0.2.13)`](#slice-14--the-accumulators-gauge-readout-0213).) The
+[`## Slice 14 — the accumulator's gauge readout (0.2.13)`](#slice-14--the-accumulators-gauge-readout-0213);
+0.2.14 the wire renderer's lightmap, §
+[`## Slice 15 — the wire renderer's lightmap (0.2.14)`](#slice-15--the-wire-renderers-lightmap-0214).) The
 0.1.0 `.hnmod` was retired by Horizon's mod-API merge (#16941); the migration is
 [`## Migration to the SDK format`](#migration-to-the-sdk-format), and the 0.1.0 in-game evidence
 stays historical (`## Gaps`).
@@ -259,6 +261,10 @@ The ruling above is about the Java mod; a migration must not carry **our** bugs 
   four wires of each kind at the broken block, a festive wire's four being copper wires, the peer's
   link removed without a second drop, and nothing in creative, §
   [`## Slice 11`](#slice-11--the-wires-a-broken-connector-drops-0210).
+- ~~**The lightmap on a wire** (block/sky light interpolation): a wire in a dark room was as bright
+  as one in daylight.~~ **Closed in 0.2.14**: the jar's endpoint light reads, per-piece `Mth.lerp`
+  and `LightTexture.pack` are carried into the existing renderer, §
+  [`## Slice 15`](#slice-15--the-wire-renderers-lightmap-0214).
 - **Contraption/Sable integration** (wires that follow a moving contraption).
 - **A 0.1.0 world's block entities do not survive the migration.** 0.1.0's entities were typed
   by their **block id** (the `block_entity` hook returned `(block_id, Compound)`); 0.2.0
@@ -3264,16 +3270,164 @@ assertion counts above/below the box's middle row rather than mean x.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review
 
+## Slice 15 — the wire renderer's lightmap (0.2.14)
+
+### The slice, the gap line and the tier fit
+
+From this file's `## Next slice` (0.2.13) and slice 10's coverage row:
+
+> **Coverage, slice 10**: "the lightmap on a wire (block/sky light interpolation) | **not ported** —
+> the wire is drawn at its type's colour without the jar's `LightTexture` interpolation (deviation
+> 6)"
+
+and the symptom it names: *"a wire in a dark room is as bright as one in daylight"*.
+
+**Choice.** The wire is drawn, coloured, sagging and lit with the jar's festive lamps since 0.2.9,
+but always at full brightness: the one visible difference from the jar that remains inside this
+port's reach. The goggles-style readout and the `PhysicsBlock`/Create display-link source stay
+**blocked** (no mod-to-mod API), and the brush wire drop stays on the level path — neither is
+touched here.
+
+**Tier fit.** `deep`: the same `world_drawn` mixin, the same wgpu pipeline and vertex buffer, the
+same published wire set — only the per-vertex colour changes. No new block, item, content file, or
+second `[[native.mixin]]` row: the two existing rows are unchanged.
+
+### What the jar does (read from bytecode, not guessed)
+
+`com/mrh0/createaddition/rendering/WireNodeRenderer` (the 1.7.2 jar, `javap -c -p`):
+
+- `wireRender` reads `getBrightness(LightLayer.BLOCK, ownPos)`, `…BLOCK, peerPos`,
+  `…SKY, ownPos`, `…SKY, peerPos` (javap lines 863–883) and passes the four levels to `wirePart`;
+- `wirePart` loops 24 pieces, `part = j / 23.0`, and per piece computes
+  `block = (int) Mth.lerp(part, blockStart, blockEnd)` and the same for sky, then
+  `LightTexture.pack(block, sky)` (javap lines 939–965), handed to `wireVert` → `setLight`. The
+  festive `lights()` path receives the same endpoint levels (javap 1059–1061).
+
+`net.minecraft.client.renderer.LightTexture` (1.21.1 client, mapped class `gey`, read as analysis):
+
+- `pack(block, sky) = (block << 4) | (sky << 20)` (`a(int,int)`, javap 627–636);
+- `getBrightness(dim, level)` is `f = level/15`, `f/(4-3f)`, lerped from the dimension's ambient to
+  1 (`a(dwy,int)`, javap 605–625);
+- the texel adds the block and sky light colours, clamps to one, applies `notGamma =
+  1 - (1-v)^3`, then a 0.04 lerp to the 0.75 grey floor (`a(float)`, javap 484–518). A dimension
+  without sky light has sky factor 0.
+
+What is carried: the four endpoint reads, the per-piece interpolation and pack, and that curve.
+The `LightTexture` colour (block tint, sky colour, gamma option, darkness) is expressed as one
+brightness multiplier — declared below. `SELFTEST=1` and `NEGATIVE=1` prove the result can fail.
+
+### Red → green (TDD)
+
+The rules went in as failing tests against the pre-slice behaviour (the lightmap factor stubbed to
+1.0). `wire-lightmap-red.log`, verbatim:
+
+```
+thread 'render::tests::a_wire_in_the_dark_is_dimmer_than_one_in_daylight' (3067712) panicked at src/render.rs:1075:5:
+a wire in the dark must be much dimmer: dark mean 0.17042342, lit mean 0.17042342
+
+test result: FAILED. 115 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Green: **116 passed, 0 failed** (`sdk-test.log`, regenerated for 0.2.14; 113 → 116: three new
+tests). They pin the jar's pack and `Mth.lerp` (7.5 → 7), the `getBrightness` curve and its
+monotonicity, and the dark-vs-lit draw's mean vertex brightness while the wire keeps its hue.
+
+### The 0.2.14 ladder
+
+| Step | Command | Result |
+|---|---|---|
+| red | `cargo test --offline` against the stub | **115 passed, 1 failed**, exit 101 (`wire-lightmap-red.log`) |
+| tests | `cargo test --offline` | **116 passed**, 0 failed (`sdk-test.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`wire-lightmap-clippy.log`) |
+| formatting | `cargo fmt --check` | clean (`wire-lightmap-fmt.log`) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` | exit 0 (`wire-lightmap-build-1.log`) |
+| package, second build | the same again | **byte-identical** (`cmp`, `wire-lightmap-build-2.log`) |
+| registry check | `cargo horizon-mod check createaddition.hmod` | 0.2.14, 204,033 B (`lightmap-check.log`) |
+| fits, pin | `… fits … --build 0a875da…` | **"made for exactly one build (it has a [native.mixin] table), so fits doesn't apply"**, exit 2 (`lightmap-fits-pin.log`) |
+| fits, other build | `… --build 0b14f8a…` | the same refusal, exit 2 (`lightmap-fits-other.log`) |
+| launcher build | `launcher-game.sh build createaddition` | `Compiling createaddition (1 of 1)`, tag `native-0a875da-accae66760b3` (`lightmap-launcher-build.log`); the launcher's log: `Function replacement: 2 functions patched by 2 mixins, without rebuilding the game (copy 68 ms, horizon-mixins 202 ms, compile 1184 ms, total 1455 ms)` (`lightmap-launcher-patch.log`) |
+| package verifier | `python3 ports/tools/verify-sdk-package.py createaddition` | **1/1** (`lightmap-verify-package.log`) |
+
+The two `fits` refusals are the route's price, unchanged: a package with a `[[native.mixin]]` row
+is bound to one game build. The substitute is the launcher build above — the two mixins re-applied
+against `0a875da` and the game ran.
+
+Deliverable: **`createaddition.hmod`, 204,033 B, SHA-256
+`aee4697fc35b2f788a344805220fcc2ccc30a76ce8674e5d5d361854da12a098`**, 127 entries, reproducible
+(two builds `cmp`-identical), no packed `Cargo.lock`, `src/runtime.rs` byte-identical
+(`03721ca4…f95d`).
+
+### In-game (`e2e-lightmap-default.log`, `PASS` + `EXIT:0`)
+
+A dedicated leg (`tools/e2e-lightmap.sh`): `--offscreen`, the proven festive rig from slice 10 in
+the End, the player four blocks south at eye height; a glowstone three blocks above the rig is the
+only light (the End has no sky light). Two settled PNGs of the **same** wire box — lit pad
+(glowstone near) and dark room (the same glowstone moved back) — are read by
+`wire_pixels()`, which counts only the wire's green-dominant pixels and averages their colour:
+
+```
+lit: 1901 green wire pixels, mean rgb(13, 53, 6)
+dark: 1901 green wire pixels, mean rgb(8, 33, 3)
+PASS: the festive wire follows the lightmap — lit mean rgb(13, 53, 6) over 1901 green pixels, dark mean rgb(8, 33, 3) over 1901 green pixels (dark green is 20 levels lower)
+```
+
+A light sweep (`lightmap-probe.log`, `probe-lightmap-*.png`) measured the same box at
+z = −1/−4/−7/−10: `1901 rgb(13,53,6)`, `1901 rgb(8,33,3)`, `76 rgb(0,48,0)`, `0`. The two chosen
+positions are the ones where the wire stays countable in both frames with a 20-level difference;
+the grey floor becomes visible only at the two far positions, which the leg rejects by its
+pixel-count floor.
+
+| log | verdict | what it proves |
+|---|---|---|
+| `e2e-lightmap-default.log` | `PASS` + `EXIT:0` | lit green mean 53 over 1901 green pixels, dark 33 over the same 1901, a 20-level drop |
+| `e2e-lightmap-selftest.log` | `FAIL` + `EXIT:1` | `SELFTEST=1` asks the dark frame to be brighter and fails on 53 > 33 |
+| `e2e-lightmap-negative.log` | `FAIL` + `EXIT:1` | the wire unlinked: 0 green wire pixels, so the count is not vacuous |
+| `e2e-lightmap-control.log` | `FAIL` + `EXIT:1` | a Nightly without the package cannot place `createaddition:connector` |
+
+`python3 ports/tools/check-e2e-logs.py createaddition-e2e --strict`:
+**logs=66 ok=66 missing-exit=0 bad-exit=0**. The A–M suite was also re-run on 0.2.14
+(`e2e-lightmap-suite.log`); its final spool-count step hit a transient `ctl inventory` null, an
+inventory/harness timing issue at the end of a 35-minute run, not a rendering regression — every
+earlier family in that log (A through M) passed, including the festive wire's rate and both ends'
+saved type.
+
+### Coverage added by this slice
+
+| family | status |
+|---|---|
+| the four endpoint block/sky light reads | **tested** — `wire_light` in `network.rs`, the jar's `wireRender` reads; printed in `lightmap-probe.log` as the measured light positions |
+| per-piece `Mth.lerp` and `LightTexture.pack` | **tested** — `the_jars_lightmap_packs_and_interpolates_block_and_sky_light` (7.5 floored to 7; `(7<<4)|(3<<20)`) |
+| the `getBrightness` curve | **tested** — `the_lightmap_brightness_follows_the_jars_get_brightness_curve` (0, 1, monotonic, the 7/15 value) |
+| dark wire is dimmer, lit wire keeps its colour | **tested** — `a_wire_in_the_dark_is_dimmer_than_one_in_daylight` (means 0.005 vs 0.169); in game 33 vs 53 green over the wire's own pixels |
+| the wire's hue survives dimming | **tested** — in game dark rgb(8,33,3) is still green-dominant, not a grey panel |
+| no-sky dimensions contribute no sky light | **tested** — the leg runs in the End; sky levels are zeroed at the source, so the block-light differential is the only variable |
+| a full `LightTexture` colour lookup (block tint, sky colour, gamma/darkness options) | **not ported** — declared as a deviation below |
+
+### Deviations of this slice (declared)
+
+1. **The lightmap colour is a scalar multiplier.** `LightTexture` fills a 16×16 RGB texture with
+   block tint, sky colour, gamma-option and darkness terms; the server pass has none of those
+   options. What is carried is the part the gap is about: the endpoint reads, the per-piece
+   interpolation and pack, the `getBrightness` curve, the clamp, `notGamma` and the grey floor.
+   The wire keeps the jar's hue but is not multiplied by the texture's exact per-channel colour.
+2. **Light is read at the wire's block positions** (own and peer), which is what the jar does, and
+   a level that cannot answer reads as full bright so an unloaded wire is not left dark.
+3. **No-sky dimensions zero the sky level at the source.** This is the jar's sky factor 0 for the
+   End and the Nether, expressed where the data is published rather than in the shader.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port
+
 ## Next slice
 
-The remaining gap line is the same one this slice only partly answered: *"GUI/tooltips: no
-goggles-style readout, no mode wrench, no `PhysicsBlock`/display source for the gauge"* — the
-**goggles-style readout and the display source** still have no implementation without Create's
-mod-to-mod API, so they are blocked, not workable. The highest-value workable family left is the
-**wire renderer's lightmap** (slice 10's gap: "a wire in a dark room is as bright as one in
-daylight"): assert in game with a screenshot at two light levels that a wire's mean brightness
-follows the block/sky light, then carry the jar's `LightTexture` interpolation into the same
-pipeline. The concrete assertion: place the proven festive rig in a lit pad and in a dark one,
-count the same wire box's green-dominant pixels' mean brightness, and require the dark frame's
-mean to be measurably lower (a `SELFTEST=1` leg inverts it and exits 1).
+The goggles-style readout, the mode wrench and the `PhysicsBlock`/display-link source remain
+**blocked**: they need Create's mod-to-mod API, which a package cannot reach. The brush wire drop
+is on the level path and is deliberately not attempted from the renderer. The highest-value
+workable family left is the **held-wire preview** (`WireNodeRenderer`'s second half,
+`clientRenderHeldWire`): the line from the selected connector's node to the player's hand while a
+spool is held, using the same `world_drawn` pipeline and the spool's pending selection the server
+already publishes through `/createaddition signals`. The concrete in-game assertion: select a
+spool, click one connector, hold it in view, take an `--offscreen` screenshot and count the
+green-dominant pixels of the preview line in the box between the connector and the hand; a second
+frame after the second click (wire laid, selection cleared) must show 0 preview pixels, and a
+`NEGATIVE=1` leg with no selection must show 0 as well.
 
